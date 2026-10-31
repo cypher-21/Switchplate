@@ -8,23 +8,18 @@ use crate::opencode::events::Decision;
 use crate::state::NotchState;
 use tauri::{Emitter, Manager};
 
-/// Type alias for the shared application state managed by Tauri.
 pub type AppState = Arc<Mutex<NotchState>>;
-
-/// Type alias for the shared OpenCode client managed by Tauri.
 pub type ClientState = Arc<Mutex<Option<OpenCodeClient>>>;
-
-/// Type alias for the thread-safe configuration managed by Tauri.
 pub type ConfigState = Arc<RwLock<Config>>;
 
-/// IPC command: get the current notch state for the frontend.
+/// IPC command: get current state.
 #[tauri::command]
 pub async fn get_state(state: tauri::State<'_, AppState>) -> Result<NotchState, String> {
     let guard = state.lock().await;
     Ok(guard.clone())
 }
 
-/// IPC command: respond to a pending permission request.
+/// IPC command: respond to an approval request.
 #[tauri::command]
 pub async fn respond_permission(
     request_id: String,
@@ -37,7 +32,6 @@ pub async fn respond_permission(
     let parsed_decision = Decision::from_str_loose(&decision)
         .ok_or_else(|| format!("Invalid decision '{}': expected allow, deny, or always", decision))?;
 
-    // Look up session_id from pending requests
     let session_id = {
         let state_guard = state.lock().await;
         state_guard
@@ -47,7 +41,6 @@ pub async fn respond_permission(
             .map(|r| r.session_id.clone())
     };
 
-    // Send the response to the OpenCode server
     let client_guard = client.lock().await;
     let opencode_client = client_guard
         .as_ref()
@@ -71,9 +64,9 @@ pub async fn respond_permission(
     // Emit state update immediately to frontend
     let _ = app_handle.emit("state-changed", &current_state);
 
-    // Immediately update window size/visibility (hides window when only_show_on_request is true)
+    // Immediately update island window size/visibility
     let cfg_guard = config.read().await;
-    if let Some(window) = app_handle.get_webview_window("notch") {
+    if let Some(window) = app_handle.get_webview_window("island") {
         crate::window::resize_and_position(&window, &cfg_guard, has_pending);
     }
 
@@ -95,10 +88,8 @@ pub async fn save_config(
     state: tauri::State<'_, AppState>,
     config: tauri::State<'_, ConfigState>,
 ) -> Result<(), String> {
-    // Save to disk at ~/.config/opencode-notch/config.toml
     new_config.save()?;
 
-    // Update in-memory state
     {
         let mut guard = config.write().await;
         *guard = new_config.clone();
@@ -109,12 +100,73 @@ pub async fn save_config(
         guard.pending_count() > 0
     };
 
-    if let Some(window) = app_handle.get_webview_window("notch") {
+    if let Some(window) = app_handle.get_webview_window("island") {
         crate::window::resize_and_position(&window, &new_config, has_pending);
     }
 
-    // Broadcast config change to frontend
     let _ = app_handle.emit("config-changed", &new_config);
 
     Ok(())
+}
+
+/// IPC command: open the dedicated settings window.
+#[tauri::command]
+pub async fn open_settings_window(app_handle: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app_handle.get_webview_window("settings") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+    Ok(())
+}
+
+/// IPC command: close/hide settings window.
+#[tauri::command]
+pub async fn close_settings_window(app_handle: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app_handle.get_webview_window("settings") {
+        let _ = window.hide();
+    }
+    Ok(())
+}
+
+/// IPC command: toggle island visibility.
+#[tauri::command]
+pub async fn toggle_island(
+    app_handle: tauri::AppHandle,
+    config: tauri::State<'_, ConfigState>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    if let Some(window) = app_handle.get_webview_window("island") {
+        let is_visible = window.is_visible().unwrap_or(false);
+        if is_visible {
+            let _ = window.hide();
+        } else {
+            let cfg = config.read().await;
+            let has_pending = {
+                let guard = state.lock().await;
+                guard.pending_count() > 0
+            };
+            crate::window::resize_and_position(&window, &cfg, has_pending);
+            let _ = window.show();
+            let _ = window.set_always_on_top(true);
+        }
+    }
+    Ok(())
+}
+
+/// IPC command: toggle pause monitoring.
+#[tauri::command]
+pub async fn toggle_monitoring(
+    config: tauri::State<'_, ConfigState>,
+    app_handle: tauri::AppHandle,
+) -> Result<bool, String> {
+    let mut guard = config.write().await;
+    guard.behavior.pause_monitoring = !guard.behavior.pause_monitoring;
+    let is_paused = guard.behavior.pause_monitoring;
+    let new_cfg = guard.clone();
+    drop(guard);
+
+    let _ = new_cfg.save();
+    let _ = app_handle.emit("config-changed", &new_cfg);
+
+    Ok(is_paused)
 }

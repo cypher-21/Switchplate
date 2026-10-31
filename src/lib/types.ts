@@ -22,26 +22,31 @@ export interface Config {
   opencode: {
     server_url: string;
     password_env: string;
+    request_timeout: number;
+    auto_reconnect: boolean;
   };
   appearance: {
-    position: "top-center" | "top-right" | "top-left" | "bottom-right" | "center" | string;
+    position: string;
     card_width: number;
     card_height: number;
     collapsed_width: number;
     collapsed_height: number;
     offset_x: number;
     offset_y: number;
-    theme: "ai-dark" | "ai-violet" | "ai-emerald" | "ai-cyber" | string;
-    accent_glow: boolean;
+    theme: string;
+    reduced_motion: boolean;
   };
   behavior: {
     only_show_on_request: boolean;
+    pause_monitoring: boolean;
     sound_enabled: boolean;
+    autostart: boolean;
   };
   shortcuts: {
+    open_island: string;
     accept: string;
     deny: string;
     always: string;
-    toggle: string;
+    open_settings: string;
   };
 }

@@ -11,7 +11,7 @@ fn default_password_env() -> String {
 }
 
 fn default_card_width() -> u32 {
-    440
+    460
 }
 
 fn default_card_height() -> u32 {
@@ -19,24 +19,23 @@ fn default_card_height() -> u32 {
 }
 
 fn default_collapsed_width() -> u32 {
-    140
+    280
 }
 
 fn default_collapsed_height() -> u32 {
-    34
+    38
 }
 
 fn default_position() -> String {
-    String::from("top-right")
+    String::from("top-center")
 }
 
 fn default_theme() -> String {
-    String::from("ai-dark")
+    String::from("industrial-swiss")
 }
 
 fn default_offset_y() -> i32 {
-    // Sleek 24px float from top edge (safely below GNOME/KDE panel)
-    24
+    12
 }
 
 fn default_offset_x() -> i32 {
@@ -51,6 +50,14 @@ fn default_false() -> bool {
     false
 }
 
+fn default_timeout() -> u32 {
+    30
+}
+
+fn default_shortcut_open_island() -> String {
+    String::from("ctrl+shift+o")
+}
+
 fn default_shortcut_accept() -> String {
     String::from("ctrl+shift+a")
 }
@@ -63,11 +70,11 @@ fn default_shortcut_always() -> String {
     String::from("ctrl+shift+w")
 }
 
-fn default_shortcut_toggle() -> String {
-    String::from("ctrl+shift+n")
+fn default_shortcut_settings() -> String {
+    String::from("ctrl+shift+s")
 }
 
-/// Root configuration loaded from ~/.config/opencode-notch/config.toml.
+/// Root configuration loaded from ~/.config/switchplate/config.toml.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -87,9 +94,13 @@ pub struct OpenCodeConfig {
     pub server_url: String,
     #[serde(default = "default_password_env")]
     pub password_env: String,
+    #[serde(default = "default_timeout")]
+    pub request_timeout: u32,
+    #[serde(default = "default_true")]
+    pub auto_reconnect: bool,
 }
 
-/// Visual appearance settings.
+/// Visual appearance settings (Industrial Swiss design system).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppearanceConfig {
     #[serde(default = "default_position")]
@@ -108,32 +119,37 @@ pub struct AppearanceConfig {
     pub offset_y: i32,
     #[serde(default = "default_theme")]
     pub theme: String,
-    #[serde(default = "default_true")]
-    pub accent_glow: bool,
+    #[serde(default = "default_false")]
+    pub reduced_motion: bool,
 }
 
 /// Behavioral settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BehaviorConfig {
-    /// If true, the notch is completely hidden when idle, and only appears
-    /// when OpenCode requests permission.
-    #[serde(default = "default_true")]
+    /// If true, the island completely hides when idle, only surfacing on approvals.
+    #[serde(default = "default_false")]
     pub only_show_on_request: bool,
     #[serde(default = "default_false")]
+    pub pause_monitoring: bool,
+    #[serde(default = "default_false")]
     pub sound_enabled: bool,
+    #[serde(default = "default_true")]
+    pub autostart: bool,
 }
 
 /// Global keyboard shortcuts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShortcutsConfig {
+    #[serde(default = "default_shortcut_open_island")]
+    pub open_island: String,
     #[serde(default = "default_shortcut_accept")]
     pub accept: String,
     #[serde(default = "default_shortcut_deny")]
     pub deny: String,
     #[serde(default = "default_shortcut_always")]
     pub always: String,
-    #[serde(default = "default_shortcut_toggle")]
-    pub toggle: String,
+    #[serde(default = "default_shortcut_settings")]
+    pub open_settings: String,
 }
 
 impl Default for Config {
@@ -152,6 +168,8 @@ impl Default for OpenCodeConfig {
         Self {
             server_url: default_server_url(),
             password_env: default_password_env(),
+            request_timeout: default_timeout(),
+            auto_reconnect: default_true(),
         }
     }
 }
@@ -167,7 +185,7 @@ impl Default for AppearanceConfig {
             offset_x: default_offset_x(),
             offset_y: default_offset_y(),
             theme: default_theme(),
-            accent_glow: default_true(),
+            reduced_motion: default_false(),
         }
     }
 }
@@ -175,8 +193,10 @@ impl Default for AppearanceConfig {
 impl Default for BehaviorConfig {
     fn default() -> Self {
         Self {
-            only_show_on_request: default_true(),
+            only_show_on_request: default_false(),
+            pause_monitoring: default_false(),
             sound_enabled: default_false(),
+            autostart: default_true(),
         }
     }
 }
@@ -184,59 +204,54 @@ impl Default for BehaviorConfig {
 impl Default for ShortcutsConfig {
     fn default() -> Self {
         Self {
+            open_island: default_shortcut_open_island(),
             accept: default_shortcut_accept(),
             deny: default_shortcut_deny(),
             always: default_shortcut_always(),
-            toggle: default_shortcut_toggle(),
+            open_settings: default_shortcut_settings(),
         }
     }
 }
 
 impl Config {
-    /// Load configuration from ~/.config/opencode-notch/config.toml.
-    /// Creates the file with annotated defaults if it doesn't exist.
+    /// Load configuration from ~/.config/switchplate/config.toml.
+    /// Checks for backward-compatibility with ~/.config/opencode-notch/config.toml.
     pub fn load() -> Self {
-        let config_path = Self::config_path();
+        let primary_path = Self::config_path();
 
-        let Some(path) = config_path else {
-            info!("No config directory found, using default configuration");
-            return Self::default();
-        };
-
-        if !path.exists() {
-            info!("Creating default configuration file at {}", path.display());
-            let default_cfg = Self::default();
-            default_cfg.save_to_path(&path);
-            return default_cfg;
-        }
-
-        match std::fs::read_to_string(&path) {
-            Ok(contents) => match toml::from_str::<Config>(&contents) {
-                Ok(config) => {
-                    info!("Loaded configuration from {}", path.display());
-                    config
+        if let Some(ref path) = primary_path {
+            if path.exists() {
+                if let Ok(contents) = std::fs::read_to_string(path) {
+                    if let Ok(config) = toml::from_str::<Config>(&contents) {
+                        info!("Loaded Switchplate configuration from {}", path.display());
+                        return config;
+                    }
                 }
-                Err(e) => {
-                    warn!(
-                        "Malformed config file at {}: {}. Using defaults",
-                        path.display(),
-                        e
-                    );
-                    Self::default()
-                }
-            },
-            Err(e) => {
-                warn!(
-                    "Could not read config file at {}: {}. Using defaults",
-                    path.display(),
-                    e
-                );
-                Self::default()
             }
         }
+
+        // Backward compatibility migration: check old paths
+        if let Some(legacy_path) = Self::legacy_config_path() {
+            if legacy_path.exists() {
+                info!("Found legacy config at {}. Migrating...", legacy_path.display());
+                if let Ok(contents) = std::fs::read_to_string(&legacy_path) {
+                    if let Ok(mut config) = toml::from_str::<Config>(&contents) {
+                        config.appearance.position = "top-center".to_string();
+                        config.appearance.theme = "industrial-swiss".to_string();
+                        let _ = config.save();
+                        return config;
+                    }
+                }
+            }
+        }
+
+        // Create new default config
+        let default_cfg = Self::default();
+        let _ = default_cfg.save();
+        default_cfg
     }
 
-    /// Save configuration to ~/.config/opencode-notch/config.toml.
+    /// Save configuration to ~/.config/switchplate/config.toml.
     pub fn save(&self) -> Result<(), String> {
         let path = Self::config_path().ok_or_else(|| "Could not determine config path".to_string())?;
         self.save_to_path(&path);
@@ -249,53 +264,44 @@ impl Config {
         }
 
         let toml_content = format!(
-r#"# OpenCode Notch Configuration
-# Location: ~/.config/opencode-notch/config.toml
+r#"# SWITCHPLATE — Configuration
+# Your control surface for OpenCode.
+# Location: ~/.config/switchplate/config.toml
 
-[behavior]
-# When true, the notch stays completely hidden when idle.
-# It only pops up when OpenCode CLI needs your approval (Allow / Deny / Always).
-only_show_on_request = {only_show_on_request}
-
-# Enable subtle notification sounds on incoming requests
-sound_enabled = {sound_enabled}
+[opencode]
+server_url = "{server_url}"
+password_env = "{password_env}"
+request_timeout = {request_timeout}
+auto_reconnect = {auto_reconnect}
 
 [appearance]
-# Position on screen: "top-center", "top-right", "top-left", "bottom-right", "center"
 position = "{position}"
-
-# Offset in pixels from the anchor edge
 offset_x = {offset_x}
 offset_y = {offset_y}
-
-# Card dimensions when expanded for permission requests
 card_width = {card_width}
 card_height = {card_height}
-
-# Pill dimensions if only_show_on_request is false
 collapsed_width = {collapsed_width}
 collapsed_height = {collapsed_height}
-
-# AI Theme: "ai-dark", "ai-violet", "ai-emerald", "ai-cyber"
 theme = "{theme}"
+reduced_motion = {reduced_motion}
 
-# Enable AI holographic gradient border glow
-accent_glow = {accent_glow}
+[behavior]
+only_show_on_request = {only_show_on_request}
+pause_monitoring = {pause_monitoring}
+sound_enabled = {sound_enabled}
+autostart = {autostart}
 
 [shortcuts]
+open_island = "{open_island}"
 accept = "{accept}"
 deny = "{deny}"
 always = "{always}"
-toggle = "{toggle}"
-
-[opencode]
-# OpenCode service is automatically discovered from ~/.local/state/opencode/service.json.
-# Override only if you run a custom server address.
-server_url = "{server_url}"
-password_env = "{password_env}"
+open_settings = "{open_settings}"
 "#,
-            only_show_on_request = self.behavior.only_show_on_request,
-            sound_enabled = self.behavior.sound_enabled,
+            server_url = self.opencode.server_url,
+            password_env = self.opencode.password_env,
+            request_timeout = self.opencode.request_timeout,
+            auto_reconnect = self.opencode.auto_reconnect,
             position = self.appearance.position,
             offset_x = self.appearance.offset_x,
             offset_y = self.appearance.offset_y,
@@ -304,13 +310,16 @@ password_env = "{password_env}"
             collapsed_width = self.appearance.collapsed_width,
             collapsed_height = self.appearance.collapsed_height,
             theme = self.appearance.theme,
-            accent_glow = self.appearance.accent_glow,
+            reduced_motion = self.appearance.reduced_motion,
+            only_show_on_request = self.behavior.only_show_on_request,
+            pause_monitoring = self.behavior.pause_monitoring,
+            sound_enabled = self.behavior.sound_enabled,
+            autostart = self.behavior.autostart,
+            open_island = self.shortcuts.open_island,
             accept = self.shortcuts.accept,
             deny = self.shortcuts.deny,
             always = self.shortcuts.always,
-            toggle = self.shortcuts.toggle,
-            server_url = self.opencode.server_url,
-            password_env = self.opencode.password_env,
+            open_settings = self.shortcuts.open_settings,
         );
 
         if let Err(e) = std::fs::write(path, toml_content) {
@@ -318,8 +327,13 @@ password_env = "{password_env}"
         }
     }
 
-    /// Returns the expected path to the configuration file.
+    /// Primary config path: ~/.config/switchplate/config.toml
     pub fn config_path() -> Option<PathBuf> {
+        dirs::config_dir().map(|dir| dir.join("switchplate").join("config.toml"))
+    }
+
+    /// Legacy config paths for migration: ~/.config/opencode-notch/config.toml
+    pub fn legacy_config_path() -> Option<PathBuf> {
         dirs::config_dir().map(|dir| dir.join("opencode-notch").join("config.toml"))
     }
 

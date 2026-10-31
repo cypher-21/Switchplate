@@ -2,16 +2,16 @@ use crate::config::Config;
 use tauri::WebviewWindow;
 use tracing::{debug, warn};
 
-/// Position and resize the notch window based on whether there are pending permission requests.
+/// Position and resize the Switchplate window based on pending permission requests.
 ///
 /// When `has_pending` is true:
 /// - Resizes to `card_width x card_height`
-/// - Positions at the configured position ("top-center", "top-right", etc.)
+/// - Positions at the configured anchor below the GNOME panel
 /// - Shows the window and sets always_on_top
 ///
 /// When `has_pending` is false:
 /// - If `only_show_on_request` is true: completely hides the window!
-/// - Otherwise: resizes to compact pill size and positions at the anchor
+/// - Otherwise: resizes to compact pill size and positions below GNOME panel
 pub fn resize_and_position(window: &WebviewWindow, config: &Config, has_pending: bool) {
     if !has_pending && config.behavior.only_show_on_request {
         debug!("No pending requests and only_show_on_request is enabled: hiding window");
@@ -40,7 +40,7 @@ pub fn resize_and_position(window: &WebviewWindow, config: &Config, has_pending:
             || (current_logical.height - logical_height).abs() >= 1.0
         {
             debug!(
-                "Resizing notch to {}x{} (scale: {})",
+                "Resizing Switchplate to {}x{} (scale: {})",
                 logical_width, logical_height, scale_factor
             );
             if let Err(e) = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
@@ -67,7 +67,7 @@ pub fn resize_and_position(window: &WebviewWindow, config: &Config, has_pending:
         config.appearance.offset_y as f64,
     );
 
-    debug!("Positioning notch at logical ({}, {}) for anchor '{}'", x, y, config.appearance.position);
+    debug!("Positioning Switchplate at logical ({}, {}) for anchor '{}'", x, y, config.appearance.position);
 
     if let Err(e) = window.set_position(tauri::Position::Logical(
         tauri::LogicalPosition::new(x, y),
@@ -75,7 +75,6 @@ pub fn resize_and_position(window: &WebviewWindow, config: &Config, has_pending:
         debug!("Position adjustment error: {}", e);
     }
 
-    // Ensure window is visible and on top when active
     let _ = window.set_always_on_top(true);
     let _ = window.show();
 }
@@ -92,14 +91,17 @@ fn calculate_coordinates(
     offset_x: f64,
     offset_y: f64,
 ) -> (f64, f64) {
+    // GNOME Top Panel is ~38px. top_margin ensures the notch floats cleanly below it.
+    let top_margin = 42.0;
+
     match position.to_lowercase().as_str() {
         "top-right" => (
             monitor_x + monitor_width - width - 24.0 + offset_x,
-            monitor_y + offset_y,
+            monitor_y + top_margin + offset_y,
         ),
         "top-left" => (
             monitor_x + 24.0 + offset_x,
-            monitor_y + offset_y,
+            monitor_y + top_margin + offset_y,
         ),
         "bottom-right" => (
             monitor_x + monitor_width - width - 24.0 + offset_x,
@@ -112,7 +114,7 @@ fn calculate_coordinates(
         // Default "top-center"
         _ => (
             monitor_x + (monitor_width - width) / 2.0 + offset_x,
-            monitor_y + offset_y,
+            monitor_y + top_margin + offset_y,
         ),
     }
 }

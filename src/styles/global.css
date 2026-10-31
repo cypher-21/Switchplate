@@ -1,3 +1,38 @@
+/* ==========================================================================
+   SWITCHPLATE — Industrial Swiss / Precision Utility Interface
+   Design System: Matte surfaces, solid charcoal, warm brass accents,
+   precision 1px borders, IBM Plex Sans & IBM Plex Mono typography.
+   ========================================================================== */
+
+@import "@fontsource/ibm-plex-sans/400.css";
+@import "@fontsource/ibm-plex-sans/500.css";
+@import "@fontsource/ibm-plex-sans/600.css";
+@import "@fontsource/ibm-plex-sans/700.css";
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
+@import "@fontsource/ibm-plex-mono/600.css";
+
+:root {
+  /* Industrial Swiss Precision Palette */
+  --bg-primary: #171715;
+  --bg-secondary: #22211E;
+  --surface-elevated: #2B2924;
+  --text-primary: #E8E1D5;
+  --text-secondary: #A59C8F;
+  --border-muted: #34312B;
+  --accent-brass: #B58B53;
+  --accent-secondary: #746B5D;
+  --surface-light: #C8BDAA;
+
+  /* Typography */
+  --font-sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace;
+
+  /* Motion */
+  --transition-fast: 140ms ease-out;
+  --transition-normal: 220ms ease-out;
+}
+
 *,
 *::before,
 *::after {
@@ -13,9 +48,40 @@ body,
   height: 100%;
   background: transparent;
   overflow: hidden;
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
-    sans-serif;
+  font-family: var(--font-sans);
+  color: var(--text-primary);
   color-scheme: dark;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  user-select: none;
+}
+
+/* Reduced motion support */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Custom technical scrollbar for settings */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-primary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-muted);
+  border-radius: 2px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-secondary);
 }

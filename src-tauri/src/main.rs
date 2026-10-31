@@ -17,12 +17,14 @@ use state::{ConnectionStatus, NotchState};
 use window::resize_and_position;
 
 use futures_util::StreamExt;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
 use tracing::{error, info, warn};
 
 fn main() {
     // On Linux running Wayland, re-exec with GDK_BACKEND=x11 so Xwayland handles the window.
-    // This allows the borderless notch panel to float at any position and stay on top reliably.
+    // This allows the borderless top-center island to float cleanly without window manager decoration conflicts.
     #[cfg(target_os = "linux")]
     {
         if std::env::var("GDK_BACKEND").map(|v| v != "x11").unwrap_or(true)
@@ -59,30 +61,166 @@ fn main() {
             commands::respond_permission,
             commands::get_config,
             commands::save_config,
+            commands::open_settings_window,
+            commands::close_settings_window,
+            commands::toggle_island,
+            commands::toggle_monitoring,
         ])
         .setup(move |app| {
             let app_handle = app.handle().clone();
 
             let should_open_settings =
-                std::env::args().any(|arg| arg == "--settings" || arg == "--preview");
+                std::env::args().any(|arg| arg == "--settings" || arg == "-s");
 
-            // Initialize notch window: hide if only_show_on_request, or show preview/pill
-            if let Some(window) = app_handle.get_webview_window("notch") {
+            // Use the bundled icon for the window and tray
+            let app_icon = app
+                .default_window_icon()
+                .cloned()
+                .expect("Failed to get default icon for tray");
+
+            // Setup Island window
+            if let Some(island_win) = app_handle.get_webview_window("island") {
+                let _ = island_win.set_icon(app_icon.clone());
+                let win_clone = island_win.clone();
+                island_win.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = win_clone.hide();
+                    }
+                });
+
+                resize_and_position(&island_win, &config_for_setup, false);
+            } else {
+                warn!("Island window not found during setup");
+            }
+
+            // Setup Dedicated Settings window
+            if let Some(settings_win) = app_handle.get_webview_window("settings") {
+                let _ = settings_win.set_icon(app_icon.clone());
+                let win_clone = settings_win.clone();
+                settings_win.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = win_clone.hide();
+                    }
+                });
+
                 if should_open_settings {
-                    resize_and_position(&window, &config_for_setup, true);
-                    let _ = window.show();
-                    let _ = window.set_always_on_top(true);
-                    let handle_clone = app_handle.clone();
-                    tauri::async_runtime::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                        let _ = handle_clone.emit("open-settings", ());
-                    });
-                } else {
-                    resize_and_position(&window, &config_for_setup, false);
+                    let _ = settings_win.show();
+                    let _ = settings_win.set_focus();
                 }
             } else {
-                warn!("Notch window not found during setup");
+                warn!("Settings window not found during setup");
             }
+
+            // Build Native Linux System Tray Menu
+            let open_island_item = MenuItem::with_id(app, "open_island", "Open Switchplate", true, None::<&str>)?;
+            let status_item = MenuItem::with_id(app, "status", "OpenCode: Connecting...", false, None::<&str>)?;
+            let accept_item = MenuItem::with_id(app, "accept", "Accept Request", true, None::<&str>)?;
+            let reject_item = MenuItem::with_id(app, "reject", "Reject Request", true, None::<&str>)?;
+            let always_item = MenuItem::with_id(app, "always", "Always Allow", true, None::<&str>)?;
+            let settings_item = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "Quit Switchplate", true, None::<&str>)?;
+
+            let tray_menu = Menu::with_items(
+                app,
+                &[
+                    &open_island_item,
+                    &status_item,
+                    &accept_item,
+                    &reject_item,
+                    &always_item,
+                    &settings_item,
+                    &quit_item,
+                ],
+            )?;
+
+            let handle_for_menu = app_handle.clone();
+            let config_for_menu = config_state_for_setup.clone();
+            let state_for_menu = app_state.clone();
+            let client_for_menu = client_state.clone();
+
+            let _tray = TrayIconBuilder::with_id("switchplate-tray")
+                .icon(app_icon)
+                .tooltip("Switchplate — Control surface for OpenCode")
+                .menu(&tray_menu)
+                .on_menu_event(move |_app, event| match event.id.as_ref() {
+                    "open_island" => {
+                        let h = handle_for_menu.clone();
+                        let cfg_state = config_for_menu.clone();
+                        let s_state = state_for_menu.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Some(win) = h.get_webview_window("island") {
+                                let cfg = cfg_state.read().await;
+                                let has_pending = {
+                                    let s = s_state.lock().await;
+                                    s.pending_count() > 0
+                                };
+                                resize_and_position(&win, &cfg, has_pending || true);
+                                let _ = win.show();
+                                let _ = win.set_always_on_top(true);
+                            }
+                        });
+                    }
+                    "accept" => {
+                        let s = state_for_menu.clone();
+                        let c = client_for_menu.clone();
+                        let cfg = config_for_menu.clone();
+                        let h = handle_for_menu.clone();
+                        tauri::async_runtime::spawn(async move {
+                            handle_shortcut_decision(s, c, h, cfg, Decision::Allow).await;
+                        });
+                    }
+                    "reject" => {
+                        let s = state_for_menu.clone();
+                        let c = client_for_menu.clone();
+                        let cfg = config_for_menu.clone();
+                        let h = handle_for_menu.clone();
+                        tauri::async_runtime::spawn(async move {
+                            handle_shortcut_decision(s, c, h, cfg, Decision::Deny).await;
+                        });
+                    }
+                    "always" => {
+                        let s = state_for_menu.clone();
+                        let c = client_for_menu.clone();
+                        let cfg = config_for_menu.clone();
+                        let h = handle_for_menu.clone();
+                        tauri::async_runtime::spawn(async move {
+                            handle_shortcut_decision(s, c, h, cfg, Decision::Always).await;
+                        });
+                    }
+                    "settings" => {
+                        if let Some(settings_win) = handle_for_menu.get_webview_window("settings") {
+                            let _ = settings_win.show();
+                            let _ = settings_win.set_focus();
+                        }
+                    }
+                    "quit" => {
+                        info!("Quit requested via tray menu. Exiting Switchplate.");
+                        std::process::exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(settings_win) = app.get_webview_window("settings") {
+                            let is_visible = settings_win.is_visible().unwrap_or(false);
+                            if is_visible {
+                                let _ = settings_win.hide();
+                            } else {
+                                let _ = settings_win.show();
+                                let _ = settings_win.set_focus();
+                            }
+                        }
+                    }
+                })
+                .build(app)?;
 
             // Spawn the OpenCode connection and event loop
             let state_for_task = app_state.clone();
@@ -100,7 +238,7 @@ fn main() {
                 .await;
             });
 
-            // Register global shortcuts
+            // Register global keyboard shortcuts
             let state_for_shortcuts = app_state.clone();
             let client_for_shortcuts = client_state.clone();
             let config_for_shortcuts = config_state_for_setup.clone();
@@ -117,11 +255,10 @@ fn main() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("Error while running OpenCode Notch");
+        .expect("Error while running Switchplate");
 }
 
-/// Continuously attempt to connect to the OpenCode server and process SSE events.
-/// Reconnects automatically on disconnection with a backoff delay.
+/// Continuously attempt to connect to OpenCode server and stream events.
 async fn run_connection_loop(
     state: AppState,
     client_state: ClientState,
@@ -129,6 +266,17 @@ async fn run_connection_loop(
     app_handle: tauri::AppHandle,
 ) {
     loop {
+        // Check if monitoring is paused
+        let is_paused = {
+            let guard = config_state.read().await;
+            guard.behavior.pause_monitoring
+        };
+
+        if is_paused {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            continue;
+        }
+
         // Update state to connecting
         {
             let mut s = state.lock().await;
@@ -147,20 +295,12 @@ async fn run_connection_loop(
             Ok(client) => {
                 info!("Connected to OpenCode server at {}", client.base_url());
 
-                // Store the client
                 {
                     let mut c = client_state.lock().await;
                     *c = Some(client.clone());
                 }
 
-                // Get initial session count
-                let session_count = client
-                    .list_sessions()
-                    .await
-                    .map(|s| s.len())
-                    .unwrap_or(0);
-
-                // Fetch any currently pending permissions that were already asked
+                let session_count = client.list_sessions().await.map(|s| s.len()).unwrap_or(0);
                 let initial_requests = client.fetch_pending_permissions().await.unwrap_or_default();
 
                 {
@@ -173,10 +313,9 @@ async fn run_connection_loop(
                 emit_state_changed(&app_handle, &state).await;
                 update_window_size(&app_handle, &state, &config_state).await;
 
-                // Subscribe to events
                 match client.subscribe_events().await {
                     Ok(event_stream) => {
-                        info!("Subscribed to SSE event stream");
+                        info!("Subscribed to OpenCode event stream");
                         process_event_stream(
                             event_stream,
                             &state,
@@ -184,15 +323,13 @@ async fn run_connection_loop(
                             &config_state,
                         )
                         .await;
-                        // If we get here, the stream ended
-                        warn!("SSE event stream ended, will reconnect");
+                        warn!("OpenCode event stream ended, will reconnect");
                     }
                     Err(e) => {
-                        error!("Failed to subscribe to SSE events: {}", e);
+                        error!("Failed to subscribe to OpenCode events: {}", e);
                     }
                 }
 
-                // Clear the client on disconnect
                 {
                     let mut c = client_state.lock().await;
                     *c = None;
@@ -203,7 +340,6 @@ async fn run_connection_loop(
             }
         }
 
-        // Update state to disconnected
         {
             let mut s = state.lock().await;
             s.connection = ConnectionStatus::Disconnected;
@@ -212,9 +348,17 @@ async fn run_connection_loop(
         emit_state_changed(&app_handle, &state).await;
         update_window_size(&app_handle, &state, &config_state).await;
 
-        // Wait before reconnecting
-        info!("Reconnecting in 5 seconds...");
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let auto_reconnect = {
+            let guard = config_state.read().await;
+            guard.opencode.auto_reconnect
+        };
+
+        if !auto_reconnect {
+            info!("Auto-reconnect disabled. Waiting 30s before retry.");
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        } else {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
     }
 }
 
@@ -228,6 +372,14 @@ async fn process_event_stream(
     futures_util::pin_mut!(event_stream);
 
     while let Some(event) = event_stream.next().await {
+        let is_paused = {
+            let guard = config_state.read().await;
+            guard.behavior.pause_monitoring
+        };
+        if is_paused {
+            continue;
+        }
+
         match event {
             OpenCodeEvent::PermissionAsked(payload) => {
                 if let Some(req) = payload.into_permission_request() {
@@ -277,14 +429,12 @@ async fn process_event_stream(
                 }
                 emit_state_changed(app_handle, state).await;
             }
-            OpenCodeEvent::Unknown => {
-                // Ignore unknown events
-            }
+            OpenCodeEvent::Unknown => {}
         }
     }
 }
 
-/// Emit a "state-changed" event to the frontend with the current state.
+/// Emit "state-changed" event to frontend with current state.
 async fn emit_state_changed(app_handle: &tauri::AppHandle, state: &AppState) {
     let current_state = {
         let s = state.lock().await;
@@ -295,7 +445,7 @@ async fn emit_state_changed(app_handle: &tauri::AppHandle, state: &AppState) {
     }
 }
 
-/// Update the notch window size and visibility based on pending requests.
+/// Update island window size and visibility based on pending requests and config.
 async fn update_window_size(
     app_handle: &tauri::AppHandle,
     state: &AppState,
@@ -306,12 +456,12 @@ async fn update_window_size(
         s.pending_count() > 0
     };
     let cfg = config_state.read().await;
-    if let Some(window) = app_handle.get_webview_window("notch") {
+    if let Some(window) = app_handle.get_webview_window("island") {
         resize_and_position(&window, &cfg, has_pending);
     }
 }
 
-/// Register global keyboard shortcuts for quick permission responses.
+/// Register global keyboard shortcuts for Switchplate.
 fn register_global_shortcuts(
     app_handle: &tauri::AppHandle,
     state: AppState,
@@ -336,85 +486,94 @@ fn register_global_shortcuts(
     let config_w = config_state.clone();
     let handle_w = handle.clone();
 
-    let config_t = config_state.clone();
-    let handle_t = handle.clone();
+    let config_o = config_state.clone();
+    let state_o = state.clone();
+    let handle_o = handle.clone();
 
-    // Accept (Allow)
-    let accept_key = "ctrl+shift+a";
-    if let Err(e) = app_handle.global_shortcut().on_shortcut(accept_key, move |_app, _shortcut, event| {
+    let handle_s = handle.clone();
+
+    // Accept (Ctrl+Shift+A)
+    let _ = app_handle.global_shortcut().on_shortcut("ctrl+shift+a", move |_app, _shortcut, event| {
         if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-            let state = state_a.clone();
-            let client = client_a.clone();
-            let config = config_a.clone();
-            let handle = handle_a.clone();
+            let s = state_a.clone();
+            let c = client_a.clone();
+            let cfg = config_a.clone();
+            let h = handle_a.clone();
             tauri::async_runtime::spawn(async move {
-                handle_shortcut_decision(state, client, handle, config, Decision::Allow).await;
+                handle_shortcut_decision(s, c, h, cfg, Decision::Allow).await;
             });
         }
-    }) {
-        warn!("Failed to register shortcut '{}': {}", accept_key, e);
-    }
+    });
 
-    // Deny (Reject)
-    let deny_key = "ctrl+shift+d";
-    if let Err(e) = app_handle.global_shortcut().on_shortcut(deny_key, move |_app, _shortcut, event| {
+    // Deny (Ctrl+Shift+D)
+    let _ = app_handle.global_shortcut().on_shortcut("ctrl+shift+d", move |_app, _shortcut, event| {
         if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-            let state = state_d.clone();
-            let client = client_d.clone();
-            let config = config_d.clone();
-            let handle = handle_d.clone();
+            let s = state_d.clone();
+            let c = client_d.clone();
+            let cfg = config_d.clone();
+            let h = handle_d.clone();
             tauri::async_runtime::spawn(async move {
-                handle_shortcut_decision(state, client, handle, config, Decision::Deny).await;
+                handle_shortcut_decision(s, c, h, cfg, Decision::Deny).await;
             });
         }
-    }) {
-        warn!("Failed to register shortcut '{}': {}", deny_key, e);
-    }
+    });
 
-    // Always allow
-    let always_key = "ctrl+shift+w";
-    if let Err(e) = app_handle.global_shortcut().on_shortcut(always_key, move |_app, _shortcut, event| {
+    // Always Allow (Ctrl+Shift+W)
+    let _ = app_handle.global_shortcut().on_shortcut("ctrl+shift+w", move |_app, _shortcut, event| {
         if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-            let state = state_w.clone();
-            let client = client_w.clone();
-            let config = config_w.clone();
-            let handle = handle_w.clone();
+            let s = state_w.clone();
+            let c = client_w.clone();
+            let cfg = config_w.clone();
+            let h = handle_w.clone();
             tauri::async_runtime::spawn(async move {
-                handle_shortcut_decision(state, client, handle, config, Decision::Always).await;
+                handle_shortcut_decision(s, c, h, cfg, Decision::Always).await;
             });
         }
-    }) {
-        warn!("Failed to register shortcut '{}': {}", always_key, e);
-    }
+    });
 
-    // Toggle visibility / Open settings
-    let toggle_key = "ctrl+shift+n";
-    if let Err(e) = app_handle.global_shortcut().on_shortcut(toggle_key, move |_app, _shortcut, event| {
+    // Open/Toggle Switchplate (Ctrl+Shift+O)
+    let _ = app_handle.global_shortcut().on_shortcut("ctrl+shift+o", move |_app, _shortcut, event| {
         if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-            if let Some(window) = handle_t.get_webview_window("notch") {
+            if let Some(window) = handle_o.get_webview_window("island") {
                 let is_visible = window.is_visible().unwrap_or(false);
                 if is_visible {
                     let _ = window.hide();
                 } else {
-                    let cfg_state = config_t.clone();
+                    let cfg_state = config_o.clone();
+                    let s_state = state_o.clone();
                     let win = window.clone();
-                    let h = handle_t.clone();
                     tauri::async_runtime::spawn(async move {
                         let cfg = cfg_state.read().await;
-                        resize_and_position(&win, &cfg, true);
+                        let has_pending = {
+                            let s = s_state.lock().await;
+                            s.pending_count() > 0
+                        };
+                        resize_and_position(&win, &cfg, has_pending || true);
                         let _ = win.show();
                         let _ = win.set_always_on_top(true);
-                        let _ = h.emit("open-settings", ());
                     });
                 }
             }
         }
-    }) {
-        warn!("Failed to register shortcut '{}': {}", toggle_key, e);
-    }
+    });
+
+    // Open Settings (Ctrl+Shift+S)
+    let _ = app_handle.global_shortcut().on_shortcut("ctrl+shift+s", move |_app, _shortcut, event| {
+        if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+            if let Some(settings_win) = handle_s.get_webview_window("settings") {
+                let is_visible = settings_win.is_visible().unwrap_or(false);
+                if is_visible {
+                    let _ = settings_win.hide();
+                } else {
+                    let _ = settings_win.show();
+                    let _ = settings_win.set_focus();
+                }
+            }
+        }
+    });
 }
 
-/// Handle a keyboard shortcut decision by responding to the current pending permission request.
+/// Handle shortcut decision by responding to current pending permission request.
 async fn handle_shortcut_decision(
     state: AppState,
     client_state: ClientState,

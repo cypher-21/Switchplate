@@ -1,10 +1,19 @@
 import { type Component, createSignal, onMount, onCleanup, Show } from "solid-js";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { NotchState, Decision, Config, PermissionRequest } from "./lib/types";
-import { getState, respondPermission, getConfig, saveConfig } from "./lib/tauri-bridge";
-import StatusDot from "./components/StatusDot";
+import {
+  getState,
+  respondPermission,
+  getConfig,
+  saveConfig,
+  openSettingsWindow,
+  closeSettingsWindow,
+} from "./lib/tauri-bridge";
+import IslandPill from "./components/IslandPill";
 import ApprovalCard from "./components/ApprovalCard";
-import SettingsModal from "./components/SettingsModal";
+import SettingsWindow from "./components/SettingsWindow";
+import "./styles/approval-card.css";
 
 const DEFAULT_STATE: NotchState = {
   connection: { status: "disconnected" },
@@ -13,45 +22,59 @@ const DEFAULT_STATE: NotchState = {
 
 const DEFAULT_CONFIG: Config = {
   opencode: {
-    server_url: "http://localhost:4096",
+    server_url: "http://127.0.0.1:49374",
     password_env: "OPENCODE_API_PASSWORD",
+    request_timeout: 30,
+    auto_reconnect: true,
   },
   appearance: {
-    position: "top-right",
-    card_width: 440,
-    card_height: 240,
-    collapsed_width: 140,
-    collapsed_height: 34,
+    position: "top-center",
+    card_width: 480,
+    card_height: 190,
+    collapsed_width: 280,
+    collapsed_height: 38,
     offset_x: 0,
-    offset_y: 24,
-    theme: "ai-dark",
-    accent_glow: true,
+    offset_y: 12,
+    theme: "industrial-swiss",
+    reduced_motion: false,
   },
   behavior: {
     only_show_on_request: true,
+    pause_monitoring: false,
     sound_enabled: false,
+    autostart: true,
   },
   shortcuts: {
+    open_island: "ctrl+shift+o",
     accept: "ctrl+shift+a",
     deny: "ctrl+shift+d",
     always: "ctrl+shift+w",
-    toggle: "ctrl+shift+n",
+    open_settings: "ctrl+shift+s",
   },
 };
 
 const MOCK_PREVIEW_REQUEST: PermissionRequest = {
-  id: "preview-id-sample",
+  id: "preview-req-sample",
   session_id: "preview-session",
-  tool: "bash",
-  args: { command: "cargo test --release && opencode run" },
+  tool: "shell",
+  args: { command: "du -sh /tmp /var/tmp 2>/dev/null" },
   timestamp: new Date().toISOString(),
 };
 
 const App: Component = () => {
   const [state, setState] = createSignal<NotchState>(DEFAULT_STATE);
   const [config, setConfig] = createSignal<Config>(DEFAULT_CONFIG);
-  const [showSettingsStandalone, setShowSettingsStandalone] = createSignal(false);
   const [previewMode, setPreviewMode] = createSignal(false);
+
+  let isSettingsWindow = false;
+  try {
+    const currentWin = getCurrentWebviewWindow();
+    if (currentWin && currentWin.label === "settings") {
+      isSettingsWindow = true;
+    }
+  } catch {
+    isSettingsWindow = false;
+  }
 
   const connectionStatus = () => state().connection.status;
   const pendingRequests = () => state().pending_requests;
@@ -88,7 +111,6 @@ const App: Component = () => {
     try {
       await saveConfig(updated);
       setConfig(updated);
-      setShowSettingsStandalone(false);
     } catch (err) {
       console.error("Failed to save configuration:", err);
     }
@@ -108,7 +130,6 @@ const App: Component = () => {
 
     const unlistenState = await listen<NotchState>("state-changed", (event) => {
       setState(event.payload);
-      // If a real request arrives, close preview mode
       if (event.payload.pending_requests.length > 0) {
         setPreviewMode(false);
       }
@@ -118,64 +139,60 @@ const App: Component = () => {
       setConfig(event.payload);
     });
 
-    const unlistenSettings = await listen("open-settings", () => {
-      setShowSettingsStandalone(true);
-    });
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (isSettingsWindow) {
+          closeSettingsWindow();
+        } else if (previewMode()) {
+          setPreviewMode(false);
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
 
     onCleanup(() => {
       unlistenState();
       unlistenConfig();
-      unlistenSettings();
+      window.removeEventListener("keydown", handleKeyDown);
     });
   });
 
+  if (isSettingsWindow) {
+    return (
+      <div class="settings-app-container">
+        <SettingsWindow
+          config={config()}
+          state={state()}
+          onSaveConfig={handleSaveConfig}
+          onClose={closeSettingsWindow}
+        />
+      </div>
+    );
+  }
+
   return (
-    <div
-      style={{
-        width: "100%",
-        height: "100%",
-        display: "flex",
-        "align-items": "center",
-        "justify-content": "center",
-        padding: isCardVisible() || showSettingsStandalone() ? "8px" : "0",
-        "box-sizing": "border-box",
-      }}
-    >
+    <div class="island-app-container">
       <Show
-        when={!showSettingsStandalone()}
+        when={isCardVisible()}
         fallback={
-          <div class={`approval-card theme-${config().appearance.theme || "ai-dark"}`}>
-            <SettingsModal
-              config={config()}
-              isPreview={previewMode()}
-              onTogglePreview={() => setPreviewMode(!previewMode())}
-              onSave={handleSaveConfig}
-              onClose={() => setShowSettingsStandalone(false)}
+          <Show when={!config().behavior.only_show_on_request}>
+            <IslandPill
+              status={connectionStatus()}
+              onClick={() => setPreviewMode(!previewMode())}
+              onOpenSettings={openSettingsWindow}
             />
-          </div>
+          </Show>
         }
       >
-        <Show
-          when={isCardVisible()}
-          fallback={
-            <Show when={!config().behavior.only_show_on_request}>
-              <StatusDot
-                status={connectionStatus()}
-                onClick={() => setShowSettingsStandalone(true)}
-              />
-            </Show>
-          }
-        >
-          <ApprovalCard
-            request={currentRequest()!}
-            queueCount={queueCount()}
-            config={config()}
-            isPreview={previewMode() && !hasRealPending()}
-            onTogglePreview={() => setPreviewMode(!previewMode())}
-            onRespond={handleRespond}
-            onSaveConfig={handleSaveConfig}
-          />
-        </Show>
+        <ApprovalCard
+          request={currentRequest()!}
+          queueCount={queueCount()}
+          config={config()}
+          isPreview={previewMode() && !hasRealPending()}
+          onRespond={handleRespond}
+          onOpenSettings={openSettingsWindow}
+          onDismiss={() => setPreviewMode(false)}
+        />
       </Show>
     </div>
   );
