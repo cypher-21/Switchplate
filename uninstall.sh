@@ -39,3 +39,4 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
 fi
 
 echo "Uninstall complete. All old versions and components removed."
+

@@ -75,8 +75,10 @@ pub fn resize_and_position(window: &WebviewWindow, config: &Config, has_pending:
         debug!("Position adjustment error: {}", e);
     }
 
-    let _ = window.set_always_on_top(true);
+    let _ = window.unminimize();
     let _ = window.show();
+    let _ = window.set_always_on_top(true);
+    let _ = window.set_focus();
 }
 
 /// Calculate screen coordinates from position anchor and offsets.

@@ -9,6 +9,7 @@ import {
   saveConfig,
   openSettingsWindow,
   closeSettingsWindow,
+  closeIsland,
 } from "./lib/tauri-bridge";
 import IslandPill from "./components/IslandPill";
 import ApprovalCard from "./components/ApprovalCard";
@@ -139,12 +140,19 @@ const App: Component = () => {
       setConfig(event.payload);
     });
 
+    const unlistenPreview = await listen("toggle-preview", () => {
+      setPreviewMode((prev) => !prev);
+    });
+
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         if (isSettingsWindow) {
           closeSettingsWindow();
         } else if (previewMode()) {
           setPreviewMode(false);
+          if (!hasRealPending()) {
+            closeIsland();
+          }
         }
       }
     };
@@ -153,6 +161,7 @@ const App: Component = () => {
     onCleanup(() => {
       unlistenState();
       unlistenConfig();
+      unlistenPreview();
       window.removeEventListener("keydown", handleKeyDown);
     });
   });
@@ -191,7 +200,12 @@ const App: Component = () => {
           isPreview={previewMode() && !hasRealPending()}
           onRespond={handleRespond}
           onOpenSettings={openSettingsWindow}
-          onDismiss={() => setPreviewMode(false)}
+          onDismiss={() => {
+            setPreviewMode(false);
+            if (!hasRealPending()) {
+              closeIsland();
+            }
+          }}
         />
       </Show>
     </div>

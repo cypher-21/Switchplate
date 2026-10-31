@@ -128,6 +128,24 @@ pub async fn close_settings_window(app_handle: tauri::AppHandle) -> Result<(), S
     Ok(())
 }
 
+/// IPC command: close island if no pending requests.
+#[tauri::command]
+pub async fn close_island(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let has_pending = {
+        let guard = state.lock().await;
+        guard.pending_count() > 0
+    };
+    if !has_pending {
+        if let Some(window) = app_handle.get_webview_window("island") {
+            let _ = window.hide();
+        }
+    }
+    Ok(())
+}
+
 /// IPC command: toggle island visibility.
 #[tauri::command]
 pub async fn toggle_island(

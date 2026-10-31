@@ -64,6 +64,7 @@ fn main() {
             commands::open_settings_window,
             commands::close_settings_window,
             commands::toggle_island,
+            commands::close_island,
             commands::toggle_monitoring,
         ])
         .setup(move |app| {
@@ -156,9 +157,12 @@ fn main() {
                                     let s = s_state.lock().await;
                                     s.pending_count() > 0
                                 };
-                                resize_and_position(&win, &cfg, has_pending || true);
+                                resize_and_position(&win, &cfg, true);
+                                let _ = win.unminimize();
                                 let _ = win.show();
                                 let _ = win.set_always_on_top(true);
+                                let _ = win.set_focus();
+                                let _ = h.emit("toggle-preview", ());
                             }
                         });
                     }
@@ -227,6 +231,7 @@ fn main() {
             let client_for_task = client_state.clone();
             let config_for_task = config_state_for_setup.clone();
             let handle_for_task = app_handle.clone();
+            let status_item_for_task = status_item.clone();
 
             tauri::async_runtime::spawn(async move {
                 run_connection_loop(
@@ -234,6 +239,7 @@ fn main() {
                     client_for_task,
                     config_for_task,
                     handle_for_task,
+                    status_item_for_task,
                 )
                 .await;
             });
@@ -264,6 +270,7 @@ async fn run_connection_loop(
     client_state: ClientState,
     config_state: ConfigState,
     app_handle: tauri::AppHandle,
+    status_item: tauri::menu::MenuItem<tauri::Wry>,
 ) {
     loop {
         // Check if monitoring is paused
@@ -273,6 +280,7 @@ async fn run_connection_loop(
         };
 
         if is_paused {
+            let _ = status_item.set_text("OpenCode: Paused");
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             continue;
         }
@@ -282,6 +290,7 @@ async fn run_connection_loop(
             let mut s = state.lock().await;
             s.connection = ConnectionStatus::Connecting;
         }
+        let _ = status_item.set_text("OpenCode: Connecting...");
         emit_state_changed(&app_handle, &state).await;
 
         let cfg = {
@@ -294,6 +303,7 @@ async fn run_connection_loop(
         match OpenCodeClient::connect(&cfg).await {
             Ok(client) => {
                 info!("Connected to OpenCode server at {}", client.base_url());
+                let _ = status_item.set_text("OpenCode: Connected");
 
                 {
                     let mut c = client_state.lock().await;
@@ -345,6 +355,7 @@ async fn run_connection_loop(
             s.connection = ConnectionStatus::Disconnected;
             s.pending_requests.clear();
         }
+        let _ = status_item.set_text("OpenCode: Offline");
         emit_state_changed(&app_handle, &state).await;
         update_window_size(&app_handle, &state, &config_state).await;
 
@@ -535,24 +546,23 @@ fn register_global_shortcuts(
     let _ = app_handle.global_shortcut().on_shortcut("ctrl+shift+o", move |_app, _shortcut, event| {
         if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
             if let Some(window) = handle_o.get_webview_window("island") {
-                let is_visible = window.is_visible().unwrap_or(false);
-                if is_visible {
-                    let _ = window.hide();
-                } else {
-                    let cfg_state = config_o.clone();
-                    let s_state = state_o.clone();
-                    let win = window.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let cfg = cfg_state.read().await;
-                        let has_pending = {
-                            let s = s_state.lock().await;
-                            s.pending_count() > 0
-                        };
-                        resize_and_position(&win, &cfg, has_pending || true);
-                        let _ = win.show();
-                        let _ = win.set_always_on_top(true);
-                    });
-                }
+                let cfg_state = config_o.clone();
+                let s_state = state_o.clone();
+                let win = window.clone();
+                let h = handle_o.clone();
+                tauri::async_runtime::spawn(async move {
+                    let cfg = cfg_state.read().await;
+                    let has_pending = {
+                        let s = s_state.lock().await;
+                        s.pending_count() > 0
+                    };
+                    resize_and_position(&win, &cfg, true);
+                    let _ = win.unminimize();
+                    let _ = win.show();
+                    let _ = win.set_always_on_top(true);
+                    let _ = win.set_focus();
+                    let _ = h.emit("toggle-preview", ());
+                });
             }
         }
     });

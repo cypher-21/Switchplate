@@ -37,6 +37,10 @@ export async function toggleIsland(): Promise<void> {
   await invoke("toggle_island");
 }
 
+export async function closeIsland(): Promise<void> {
+  await invoke("close_island");
+}
+
 export async function toggleMonitoring(): Promise<boolean> {
   return await invoke<boolean>("toggle_monitoring");
 }
