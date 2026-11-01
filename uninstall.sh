@@ -25,7 +25,9 @@ echo "Removing application icons..."
 rm -f "${HOME}/.local/share/icons/hicolor/128x128/apps/opencode-notch.png"
 rm -f "${HOME}/.local/share/pixmaps/opencode-notch.png"
 
-echo "Removing webview cache..."
+echo "Removing configuration and webview cache..."
+rm -rf "${HOME}/.config/switchplate"
+rm -rf "${HOME}/.config/opencode-notch"
 rm -rf "${HOME}/.local/share/dev.opencode.notch"
 rm -rf "${HOME}/.local/share/dev.switchplate.desktop"
 

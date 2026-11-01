@@ -63,12 +63,14 @@ fn main() {
                     let _ = win.show();
                     let _ = win.set_focus();
                 }
-            } else if let Some(win) = app.get_webview_window("island") {
-                let _ = win.unminimize();
-                let _ = win.show();
-                let _ = win.set_always_on_top(true);
-                let _ = win.set_focus();
-                let _ = app.emit("toggle-preview", ());
+            } else if args.iter().any(|a| a == "--island" || a == "-i" || a == "--open") {
+                if let Some(win) = app.get_webview_window("island") {
+                    let _ = win.unminimize();
+                    let _ = win.show();
+                    let _ = win.set_always_on_top(true);
+                    let _ = win.set_focus();
+                    let _ = app.emit("toggle-preview", ());
+                }
             }
         }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())

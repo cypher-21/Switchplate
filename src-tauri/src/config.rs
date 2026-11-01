@@ -127,7 +127,7 @@ pub struct AppearanceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BehaviorConfig {
     /// If true, the island completely hides when idle, only surfacing on approvals.
-    #[serde(default = "default_false")]
+    #[serde(default = "default_true")]
     pub only_show_on_request: bool,
     #[serde(default = "default_false")]
     pub pause_monitoring: bool,
@@ -193,7 +193,7 @@ impl Default for AppearanceConfig {
 impl Default for BehaviorConfig {
     fn default() -> Self {
         Self {
-            only_show_on_request: default_false(),
+            only_show_on_request: default_true(),
             pause_monitoring: default_false(),
             sound_enabled: default_false(),
             autostart: default_true(),
