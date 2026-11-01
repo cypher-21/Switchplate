@@ -1,7 +1,8 @@
-import { type Component } from "solid-js";
+import { type Component, createSignal, Show } from "solid-js";
 import type { PermissionRequest, Decision, Config } from "../lib/types";
 import ActionButtons from "./ActionButtons";
 import QueueBadge from "./QueueBadge";
+import { playApproveChime, playRejectChime } from "../lib/sound";
 
 interface ApprovalCardProps {
   request: PermissionRequest;
@@ -34,10 +35,29 @@ function formatCommand(args: unknown): string {
 }
 
 const ApprovalCard: Component<ApprovalCardProps> = (props) => {
+  const [feedback, setFeedback] = createSignal<Decision | null>(null);
+
   const toolName = () => {
     const t = props.request.tool.toUpperCase();
     if (t === "BASH") return "SHELL";
     return t;
+  };
+
+  const handleAction = (decision: Decision) => {
+    setFeedback(decision);
+
+    if (props.config.behavior.sound_enabled) {
+      if (decision === "deny" || decision === "reject") {
+        playRejectChime();
+      } else {
+        playApproveChime();
+      }
+    }
+
+    window.setTimeout(() => {
+      props.onRespond(decision);
+      setFeedback(null);
+    }, 600);
   };
 
   return (
@@ -90,8 +110,50 @@ const ApprovalCard: Component<ApprovalCardProps> = (props) => {
         <span class="command-text">{formatCommand(props.request.args)}</span>
       </div>
 
-      {/* Action Buttons Row */}
-      <ActionButtons onRespond={props.onRespond} />
+      {/* Action Buttons or Feedback Banner */}
+      <Show
+        when={!feedback()}
+        fallback={
+          <div class={`response-feedback response-feedback--${feedback()}`}>
+            <div class="response-feedback__icon">
+              {feedback() === "deny" || feedback() === "reject" ? (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              ) : feedback() === "always" || feedback() === "always_approve" ? (
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4">
+                  <polygon points="12 2 2 7 12 12 22 7 12 2" />
+                  <polyline points="2 17 12 22 22 17" />
+                  <polyline points="2 12 12 17 22 12" />
+                </svg>
+              ) : (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+              )}
+            </div>
+            <div class="response-feedback__text">
+              <span class="response-feedback__title">
+                {feedback() === "deny" || feedback() === "reject"
+                  ? "ACTION DECLINED"
+                  : feedback() === "always" || feedback() === "always_approve"
+                  ? "RULE SAVED: ALWAYS ALLOW"
+                  : "ACTION APPROVED"}
+              </span>
+              <span class="response-feedback__desc">
+                {feedback() === "deny" || feedback() === "reject"
+                  ? "Tool execution declined"
+                  : feedback() === "always" || feedback() === "always_approve"
+                  ? "Tool permanently authorized for this session"
+                  : "Response delivered to OpenCode CLI"}
+              </span>
+            </div>
+          </div>
+        }
+      >
+        <ActionButtons onRespond={handleAction} />
+      </Show>
     </div>
   );
 };

@@ -111,7 +111,7 @@ fn main() {
                     }
                 });
 
-                resize_and_position(&island_win, &config_for_setup, false);
+                resize_and_position(&island_win, &config_for_setup, false, false);
             } else {
                 warn!("Island window not found during setup");
             }
@@ -170,16 +170,15 @@ fn main() {
                     "open_island" => {
                         let h = handle_for_menu.clone();
                         let cfg_state = config_for_menu.clone();
-                        let s_state = state_for_menu.clone();
                         tauri::async_runtime::spawn(async move {
                             if let Some(win) = h.get_webview_window("island") {
                                 let cfg = cfg_state.read().await;
-                                resize_and_position(&win, &cfg, true);
+                                resize_and_position(&win, &cfg, true, true);
                                 let _ = win.unminimize();
                                 let _ = win.show();
                                 let _ = win.set_always_on_top(true);
                                 let _ = win.set_focus();
-                                let _ = h.emit("toggle-preview", ());
+                                let _ = h.emit("open-island", ());
                             }
                         });
                     }
@@ -217,7 +216,10 @@ fn main() {
                         }
                     }
                     "quit" => {
-                        info!("Quit requested via tray menu. Exiting Switchplate.");
+                        info!("Quit requested via tray menu. Stopping service and exiting Switchplate.");
+                        let _ = std::process::Command::new("systemctl")
+                            .args(["--user", "stop", "opencode-notch.service"])
+                            .status();
                         std::process::exit(0);
                     }
                     _ => {}
@@ -374,7 +376,6 @@ async fn run_connection_loop(
         }
         let _ = status_item.set_text("OpenCode: Offline");
         emit_state_changed(&app_handle, &state).await;
-        update_window_size(&app_handle, &state, &config_state).await;
 
         let auto_reconnect = {
             let guard = config_state.read().await;
@@ -485,7 +486,7 @@ async fn update_window_size(
     };
     let cfg = config_state.read().await;
     if let Some(window) = app_handle.get_webview_window("island") {
-        resize_and_position(&window, &cfg, has_pending);
+        resize_and_position(&window, &cfg, has_pending, false);
     }
 }
 
@@ -515,7 +516,6 @@ fn register_global_shortcuts(
     let handle_w = handle.clone();
 
     let config_o = config_state.clone();
-    let state_o = state.clone();
     let handle_o = handle.clone();
 
     let handle_s = handle.clone();
@@ -564,17 +564,22 @@ fn register_global_shortcuts(
         if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
             if let Some(window) = handle_o.get_webview_window("island") {
                 let cfg_state = config_o.clone();
-                let s_state = state_o.clone();
                 let win = window.clone();
                 let h = handle_o.clone();
                 tauri::async_runtime::spawn(async move {
-                    let cfg = cfg_state.read().await;
-                    resize_and_position(&win, &cfg, true);
-                    let _ = win.unminimize();
-                    let _ = win.show();
-                    let _ = win.set_always_on_top(true);
-                    let _ = win.set_focus();
-                    let _ = h.emit("toggle-preview", ());
+                    let is_vis = win.is_visible().unwrap_or(false);
+                    if is_vis {
+                        let _ = win.hide();
+                        let _ = h.emit("island-closed", ());
+                    } else {
+                        let cfg = cfg_state.read().await;
+                        resize_and_position(&win, &cfg, true, true);
+                        let _ = win.unminimize();
+                        let _ = win.show();
+                        let _ = win.set_always_on_top(true);
+                        let _ = win.set_focus();
+                        let _ = h.emit("open-island", ());
+                    }
                 });
             }
         }

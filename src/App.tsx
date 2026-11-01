@@ -14,6 +14,7 @@ import {
 import IslandPill from "./components/IslandPill";
 import ApprovalCard from "./components/ApprovalCard";
 import SettingsWindow from "./components/SettingsWindow";
+import { playRequestChime } from "./lib/sound";
 import "./styles/approval-card.css";
 
 const DEFAULT_STATE: NotchState = {
@@ -42,7 +43,7 @@ const DEFAULT_CONFIG: Config = {
   behavior: {
     only_show_on_request: true,
     pause_monitoring: false,
-    sound_enabled: false,
+    sound_enabled: true,
     autostart: true,
   },
   shortcuts: {
@@ -97,12 +98,16 @@ const App: Component = () => {
   const handleRespond = async (decision: Decision) => {
     if (!hasRealPending() && previewMode()) {
       setPreviewMode(false);
+      closeIsland();
       return;
     }
     const req = currentRequest();
     if (!req) return;
     try {
       await respondPermission(req.id, decision);
+      if (pendingRequests().length <= 1 && config().behavior.only_show_on_request) {
+        closeIsland();
+      }
     } catch (err) {
       console.error("Failed to respond to permission request:", err);
     }
@@ -130,9 +135,14 @@ const App: Component = () => {
     }
 
     const unlistenState = await listen<NotchState>("state-changed", (event) => {
+      const prevCount = state().pending_requests.length;
+      const newCount = event.payload.pending_requests.length;
       setState(event.payload);
-      if (event.payload.pending_requests.length > 0) {
+      if (newCount > prevCount) {
         setPreviewMode(false);
+        if (config().behavior.sound_enabled) {
+          playRequestChime();
+        }
       }
     });
 
@@ -140,8 +150,27 @@ const App: Component = () => {
       setConfig(event.payload);
     });
 
+    const unlistenOpen = await listen("open-island", () => {
+      setPreviewMode(true);
+      if (config().behavior.sound_enabled) {
+        playRequestChime();
+      }
+    });
+
+    const unlistenClose = await listen("island-closed", () => {
+      setPreviewMode(false);
+    });
+
     const unlistenPreview = await listen("toggle-preview", () => {
-      setPreviewMode((prev) => !prev);
+      setPreviewMode((prev) => {
+        const next = !prev;
+        if (!next && !hasRealPending()) {
+          closeIsland();
+        } else if (next && config().behavior.sound_enabled) {
+          playRequestChime();
+        }
+        return next;
+      });
     });
 
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -161,6 +190,8 @@ const App: Component = () => {
     onCleanup(() => {
       unlistenState();
       unlistenConfig();
+      unlistenOpen();
+      unlistenClose();
       unlistenPreview();
       window.removeEventListener("keydown", handleKeyDown);
     });

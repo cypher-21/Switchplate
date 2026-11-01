@@ -12,8 +12,8 @@ use tracing::{debug, warn};
 /// When `has_pending` is false:
 /// - If `only_show_on_request` is true: completely hides the window!
 /// - Otherwise: resizes to compact pill size and positions below GNOME panel
-pub fn resize_and_position(window: &WebviewWindow, config: &Config, has_pending: bool) {
-    if !has_pending && config.behavior.only_show_on_request {
+pub fn resize_and_position(window: &WebviewWindow, config: &Config, has_pending: bool, force_show: bool) {
+    if !has_pending && !force_show && config.behavior.only_show_on_request {
         debug!("No pending requests and only_show_on_request is enabled: hiding window");
         let _ = window.hide();
         return;
@@ -21,7 +21,7 @@ pub fn resize_and_position(window: &WebviewWindow, config: &Config, has_pending:
 
     let scale_factor = window.scale_factor().unwrap_or(1.0);
 
-    let (logical_width, logical_height) = if has_pending {
+    let (logical_width, logical_height) = if has_pending || force_show {
         (
             config.appearance.card_width as f64,
             config.appearance.card_height as f64,

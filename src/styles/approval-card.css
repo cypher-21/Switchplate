@@ -340,6 +340,103 @@
   transform: translateY(0);
 }
 
+/* Response Feedback Banner (Mechanical Industrial confirmation) */
+.response-feedback {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  width: 100%;
+  box-sizing: border-box;
+  animation: mechanical-slide 140ms ease-out both;
+}
+
+.response-feedback--allow {
+  background: rgba(181, 139, 83, 0.12);
+  border: 1px solid #B58B53;
+  color: #E8E1D5;
+}
+
+.response-feedback--always {
+  background: rgba(197, 154, 97, 0.16);
+  border: 1px solid #C59A61;
+  color: #E8E1D5;
+}
+
+.response-feedback--deny,
+.response-feedback--reject {
+  background: rgba(180, 60, 60, 0.12);
+  border: 1px solid rgba(200, 80, 80, 0.5);
+  color: #E8E1D5;
+}
+
+.response-feedback__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.response-feedback--allow .response-feedback__icon {
+  background: #B58B53;
+  color: #171715;
+}
+
+.response-feedback--always .response-feedback__icon {
+  background: #C59A61;
+  color: #171715;
+}
+
+.response-feedback--deny .response-feedback__icon,
+.response-feedback--reject .response-feedback__icon {
+  background: #8A2D2D;
+  color: #E8E1D5;
+}
+
+.response-feedback__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.response-feedback__title {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #E8E1D5;
+}
+
+.response-feedback__desc {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: #A59C8F;
+}
+
+.test-chime-btn {
+  background: #2B2924;
+  border: 1px solid #34312B;
+  color: #A59C8F;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.test-chime-btn:hover {
+  background: #34312B;
+  color: #E8E1D5;
+  border-color: #746B5D;
+}
+
 .island-app-container {
   width: 100%;
   height: 100%;

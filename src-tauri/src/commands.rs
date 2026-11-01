@@ -67,7 +67,7 @@ pub async fn respond_permission(
     // Immediately update island window size/visibility
     let cfg_guard = config.read().await;
     if let Some(window) = app_handle.get_webview_window("island") {
-        crate::window::resize_and_position(&window, &cfg_guard, has_pending);
+        crate::window::resize_and_position(&window, &cfg_guard, has_pending, false);
     }
 
     Ok(())
@@ -101,7 +101,7 @@ pub async fn save_config(
     };
 
     if let Some(window) = app_handle.get_webview_window("island") {
-        crate::window::resize_and_position(&window, &new_config, has_pending);
+        crate::window::resize_and_position(&window, &new_config, has_pending, false);
     }
 
     let _ = app_handle.emit("config-changed", &new_config);
@@ -163,7 +163,7 @@ pub async fn toggle_island(
                 let guard = state.lock().await;
                 guard.pending_count() > 0
             };
-            crate::window::resize_and_position(&window, &cfg, has_pending);
+            crate::window::resize_and_position(&window, &cfg, has_pending, true);
             let _ = window.show();
             let _ = window.set_always_on_top(true);
         }

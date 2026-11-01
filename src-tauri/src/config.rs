@@ -131,7 +131,7 @@ pub struct BehaviorConfig {
     pub only_show_on_request: bool,
     #[serde(default = "default_false")]
     pub pause_monitoring: bool,
-    #[serde(default = "default_false")]
+    #[serde(default = "default_true")]
     pub sound_enabled: bool,
     #[serde(default = "default_true")]
     pub autostart: bool,

@@ -1,6 +1,7 @@
 import { type Component, createSignal, onMount, onCleanup } from "solid-js";
 import type { Config, NotchState } from "../lib/types";
 import SwitchplateIcon from "./SwitchplateIcon";
+import { playRequestChime } from "../lib/sound";
 
 interface SettingsWindowProps {
   config: Config;
@@ -24,7 +25,7 @@ const SettingsWindow: Component<SettingsWindowProps> = (props) => {
   const [reducedMotion, setReducedMotion] = createSignal(props.config.appearance.reduced_motion ?? false);
   const [onlyOnRequest, setOnlyOnRequest] = createSignal(props.config.behavior.only_show_on_request ?? true);
   const [pauseMonitoring, setPauseMonitoring] = createSignal(props.config.behavior.pause_monitoring ?? false);
-  const [soundEnabled, setSoundEnabled] = createSignal(props.config.behavior.sound_enabled ?? false);
+  const [soundEnabled, setSoundEnabled] = createSignal(props.config.behavior.sound_enabled ?? true);
   const [savedNotice, setSavedNotice] = createSignal(false);
 
   const isConnected = () => props.state.connection.status === "connected";
@@ -360,16 +361,26 @@ const SettingsWindow: Component<SettingsWindowProps> = (props) => {
               <div class="settings-toggle-row">
                 <div class="settings-toggle-info">
                   <span class="settings-toggle-title">Audio notification</span>
-                  <span class="settings-toggle-subtext">Play subtle hardware click on incoming approval requests.</span>
+                  <span class="settings-toggle-subtext">Play hardware chimes on incoming approval requests and responses.</span>
                 </div>
-                <label class="switch">
-                  <input
-                    type="checkbox"
-                    checked={soundEnabled()}
-                    onChange={(e) => setSoundEnabled(e.currentTarget.checked)}
-                  />
-                  <span class="slider" />
-                </label>
+                <div style={{ display: "flex", "align-items": "center", gap: "10px" }}>
+                  <button
+                    type="button"
+                    class="test-chime-btn"
+                    onClick={() => playRequestChime()}
+                    title="Test chime sound"
+                  >
+                    Test Sound
+                  </button>
+                  <label class="switch">
+                    <input
+                      type="checkbox"
+                      checked={soundEnabled()}
+                      onChange={(e) => setSoundEnabled(e.currentTarget.checked)}
+                    />
+                    <span class="slider" />
+                  </label>
+                </div>
               </div>
             </div>
           )}

@@ -78,7 +78,7 @@ After=graphical-session.target
 
 [Service]
 ExecStart=${INSTALL_DIR}/opencode-notch
-Restart=always
+Restart=on-failure
 RestartSec=3
 Environment=DISPLAY=:0
 
