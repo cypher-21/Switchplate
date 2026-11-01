@@ -14,6 +14,14 @@ pub enum OpenCodeEvent {
     SessionEnded(SessionEventPayload),
     #[serde(rename = "session.deleted")]
     SessionDeleted(SessionEventPayload),
+    #[serde(rename = "session.idle")]
+    SessionIdle(serde_json::Value),
+    #[serde(rename = "message.completed")]
+    MessageCompleted(serde_json::Value),
+    #[serde(rename = "turn.completed")]
+    TurnCompleted(serde_json::Value),
+    #[serde(rename = "response.completed")]
+    ResponseCompleted(serde_json::Value),
     #[serde(other)]
     Unknown,
 }

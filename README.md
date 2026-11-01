@@ -1,132 +1,195 @@
-# OpenCode Notch
+# Switchplate
 
-A lightweight, Linux-native floating notification panel anchored at the top-center of your screen that serves as an instant approval and denial interface for OpenCode CLI.
+**Precision Dynamic Island & Control Surface for AI Coding Agents**
 
-No mascots, no heavy electron processes, no multi-agent relay hooks. Built specifically and purely for OpenCode CLI.
+Switchplate is a Linux-native desktop companion that brings a floating dynamic island and precision hardware-inspired control surface to agentic coding runtimes—including OpenCode, Claude Code, Gemini CLI, Antigravity, and local LLM agents.
 
----
-
-## Features
-
-- **Top-Center Floating Notch:** Discreet 10px status dot when idle (green for connected, red for disconnected, yellow for connecting).
-- **Instant Expand on Permission Request:** When OpenCode CLI halts on a tool action (`bash`, `edit`, `webfetch`), the notch smoothly expands into an approval card.
-- **Single-Click & Global Shortcut Decisions:**
-  - **Accept / Once:** `Ctrl+Shift+A` (or click Accept)
-  - **Reject / Deny:** `Ctrl+Shift+D` (or click Reject)
-  - **Always Allow:** `Ctrl+Shift+W` (or click Always)
-  - **Toggle Notch Visibility:** `Ctrl+Shift+N`
-- **Native Auto-Discovery:** Automatically detects running OpenCode service instances from `~/.local/state/opencode/service.json` and `~/.config/opencode/service.json` without requiring manual port or password configuration.
-- **Native OpenCode v2 Protocol:** Integrates directly with OpenCode v2's `/api/event` SSE stream and `/api/session/{sessionID}/permission/{requestID}/reply` endpoint.
-- **Ultra Lightweight:** 10 MB stripped binary built with Tauri 2 and Solid.js. Uses approximately 25-30 MB RAM.
+When autonomous AI agents request tool approval (shell commands, file modifications, network fetches), Switchplate surfaces an unobtrusive top-anchored approval card. Make decisions instantly using mouse controls or global keyboard shortcuts from anywhere in your desktop without losing terminal focus.
 
 ---
 
-## Requirements
+## Key Features
 
-- Linux (X11 or Wayland)
-- WebKit2GTK 4.1 (`libwebkit2gtk-4.1-dev` on Debian/Ubuntu)
-- OpenCode CLI (`opencode`)
+- **Industrial Swiss Interface:** Designed as a tactile hardware instrument. High contrast, warm brass accents (#B58B53), solid matte charcoal (#171715), and IBM Plex typography. No emojis, no glass blur, no distractions.
+- **Dynamic Top Island:** Floats discreetly below your top bar. Auto-hides when idle, and expands instantly when tool approval is required.
+- **Immediate Response Lifecycle:** One-click instant execution with no artificial delays.
+- **Acoustic Studio Chimes:** Modeled harmonic acoustic bells synthesized using the Web Audio API with zero external media files. Distinct cues for incoming requests and task completion.
+- **Response Ready Popups:** Informs you immediately when an AI agent finishes generating code or completes execution, allowing you to review results in your terminal.
+- **Global Keyboard Shortcuts:**
+  - `Ctrl + Shift + A`: Accept / Allow Once
+  - `Ctrl + Shift + D`: Reject / Deny
+  - `Ctrl + Shift + W`: Always Allow (Remember Rule)
+  - `Ctrl + Shift + O`: Open / Toggle Switchplate Island
+  - `Ctrl + Shift + S`: Open Dedicated Settings Surface
+  - `Escape`: Dismiss / Hide Island or Settings
+- **System Tray Integration:** Real-time connection diagnostics (`Connected` / `Connecting` / `Offline`), single-instance process protection, and instant access to controls.
+- **Lightweight Native Performance:** Built with Tauri 2 and Solid.js. 14 MB stripped binary with minimal RAM footprint (~28 MB).
+- **Universal Multi-Agent Ready:** Architecture decoupled from single tools, designed to integrate with OpenCode, Claude, Gemini, and Antigravity.
 
 ---
 
-## Building from Source
+## Visual Architecture
 
-```bash
-# 1. Install frontend dependencies and build assets
-npm install
-npm run build
-
-# 2. Build Rust release binary
-cd src-tauri
-cargo build --release
-strip target/release/opencode-notch
+```
++-----------------------------------------------------------------------+
+|  [ = SWITCHPLATE | CONNECTED ]                                        |
++-----------------------------------------------------------------------+
+                                  |
+                                  v
++-----------------------------------------------------------------------+
+| | OPENCODE REQUEST                                           [SHELL]  |
+|   ACTIONS REQUIRING YOUR APPROVAL                                     |
+|                                                                       |
+|   $ du -sh /tmp /var/tmp 2>/dev/null                                  |
+|                                                                       |
+|   [ ACCEPT ]              [ REJECT ]              [ ALWAYS ALLOW ]    |
+|   Ctrl+Shift+A            Ctrl+Shift+D            Ctrl+Shift+W        |
++-----------------------------------------------------------------------+
 ```
 
 ---
 
-## Installation
+## Quickstart & Installation
 
-Run the provided installation script:
+Switchplate provides multiple simple installation methods.
+
+### Option 1: Debian / Ubuntu Package (.deb)
+
+Recommended for Debian, Ubuntu, Linux Mint, Pop!_OS, and Kali Linux:
+
+```bash
+sudo dpkg -i dist/packages/switchplate_1.0.0_amd64.deb
+```
+
+This installs the binary to `/usr/bin/switchplate`, registers desktop launchers, and installs application icons.
+
+### Option 2: Single Standalone Binary
+
+Switchplate is compiled as a self-contained executable with all UI assets embedded:
+
+```bash
+# Make executable and run anywhere
+chmod +x switchplate
+./switchplate
+```
+
+### Option 3: Automated User Installer
+
+Run the included installation script to set up user binaries, desktop entries, and systemd daemon management:
 
 ```bash
 ./install.sh
 ```
 
-This installs:
-- Executable to `~/.local/bin/opencode-notch`
-- Desktop entry to `~/.local/share/applications/opencode-notch.desktop`
+To cleanly remove Switchplate and all associated services:
+
+```bash
+./uninstall.sh
+```
 
 ---
 
-## Usage
+## Building from Source
 
-Start the notch in the background:
+### Prerequisites
+
+- Linux (X11 or Wayland)
+- Rust toolchain (`cargo`, `rustc`)
+- Node.js (v18+) & `npm`
+- WebKit2GTK 4.1 development libraries:
+  - Debian/Ubuntu: `sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file libssl-dev libayatana-appindicator3-dev librsvg2-dev`
+  - Fedora: `sudo dnf install webkit2gtk4.1-devel openssl-devel libappindicator-gtk3-devel`
+  - Arch Linux: `sudo pacman -S webkit2gtk-4.1 libappindicator-gtk3`
+
+### Build Steps
 
 ```bash
-opencode-notch &
+# 1. Install frontend dependencies and build Vite bundle
+npm install
+npm run build
+
+# 2. Build Rust release binary with Tauri
+cargo build --release --manifest-path src-tauri/Cargo.toml
+strip src-tauri/target/release/switchplate
 ```
 
-Or launch it via your desktop environment's application menu.
-
-When you run OpenCode commands in your terminal:
-
-```bash
-opencode
-# or
-opencode run "inspect git status and run tests"
-```
-
-Whenever OpenCode requests permission for bash commands or file modifications, the notch will drop down from the top center showing:
-1. Tool badge (`BASH`, `EDIT`, etc.)
-2. Exact command / file parameters
-3. `Accept`, `Reject`, and `Always` action buttons
-4. Queue indicator if multiple permissions are waiting
-
-You can click any button or press the keyboard shortcuts (`Ctrl+Shift+A`, `Ctrl+Shift+D`, `Ctrl+Shift+W`) without leaving your terminal.
+The resulting binary will be located at `src-tauri/target/release/switchplate`.
 
 ---
 
 ## Configuration
 
-Configuration is optional. The notch automatically detects the running OpenCode service. To customize settings, create `~/.config/opencode-notch/config.toml`:
+Configuration is stored in `~/.config/switchplate/config.toml`. It is created automatically with sensible defaults upon first run.
 
 ```toml
 [opencode]
-server_url = "http://localhost:4096"
+server_url = "http://127.0.0.1:49374"
 password_env = "OPENCODE_API_PASSWORD"
+request_timeout = 30
+auto_reconnect = true
 
 [appearance]
-notch_width = 400
-notch_height = 220
-collapsed_size = 32
+position = "top-center"   # "top-center", "top-right", "top-left"
+card_width = 480
+card_height = 190
+collapsed_width = 280
+collapsed_height = 38
+offset_x = 0
+offset_y = 12
+theme = "industrial-swiss"
+reduced_motion = false
 
 [behavior]
-auto_hide_seconds = 0
+only_show_on_request = true
+pause_monitoring = false
 sound_enabled = true
+autostart = true
+
+[shortcuts]
+open_island = "ctrl+shift+o"
+accept = "ctrl+shift+a"
+deny = "ctrl+shift+d"
+always = "ctrl+shift+w"
+open_settings = "ctrl+shift+s"
 ```
 
 ---
 
-## Architecture Overview
+## Service Management
 
-```
-OpenCode CLI (v2.2+)
-  |-- Service daemon (~/.local/state/opencode/service.json)
-  |-- SSE Stream: GET /api/event (emits permission.asked, permission.replied)
-  \-- Permission API: POST /api/session/{sessionID}/permission/{requestID}/reply
+Switchplate runs as a lightweight user systemd daemon:
 
-opencode-notch (Rust backend + Solid.js)
-  |-- src-tauri/src/opencode/discovery.rs (detects port and password)
-  |-- src-tauri/src/opencode/client.rs (SSE listener and reply dispatcher)
-  |-- src-tauri/src/opencode/events.rs (flexible v2 event parser)
-  |-- src-tauri/src/state.rs (NotchState queue and connection status)
-  |-- src-tauri/src/window.rs (top-center screen positioning and state resizing)
-  \-- src/ (Solid.js reactive UI: StatusDot, ApprovalCard, ActionButtons)
+```bash
+# Check service status
+systemctl --user status switchplate.service
+
+# Restart service
+systemctl --user restart switchplate.service
+
+# Stop service
+systemctl --user stop switchplate.service
+
+# View live daemon logs
+journalctl --user -u switchplate.service -f
 ```
 
 ---
 
-## Future Phase: Local Voice Dictation
+## Roadmap
 
-Phase 2 will integrate an embedded local voice model (`whisper.cpp` tiny.en, ~75MB) and microphone capture (`cpal`) to allow holding a hotkey and dictating natural language instructions directly into active OpenCode sessions.
+- [x] Precision Industrial Swiss design system
+- [x] Zero-latency instant approval actions
+- [x] Studio acoustic bell chime synthesis (Web Audio API)
+- [x] Response generation completion popups
+- [x] Native Debian (.deb) package distribution
+- [x] Single standalone binary distribution
+- [ ] Multi-agent relay adapter (Claude Code CLI hook)
+- [ ] Google Gemini CLI approval bridge
+- [ ] Antigravity native RPC sidecar connector
+- [ ] Interactive diff viewer modal
 
+---
+
+## License
+
+MIT License. Designed and engineered for high-performance agentic engineering workflows.

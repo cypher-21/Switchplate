@@ -188,3 +188,20 @@ pub async fn toggle_monitoring(
 
     Ok(is_paused)
 }
+
+/// IPC command: test/trigger a response completed popup.
+#[tauri::command]
+pub async fn test_response_notification(
+    app_handle: tauri::AppHandle,
+    config: tauri::State<'_, ConfigState>,
+) -> Result<(), String> {
+    if let Some(win) = app_handle.get_webview_window("island") {
+        let cfg = config.read().await;
+        crate::window::resize_and_position(&win, &cfg, true, true);
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_always_on_top(true);
+        let _ = app_handle.emit("response-completed", ());
+    }
+    Ok(())
+}

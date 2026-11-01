@@ -437,6 +437,132 @@
   border-color: #746B5D;
 }
 
+/* ---- Response Notice Card (Completion Popup) ---- */
+.response-notice-card {
+  position: relative;
+  width: 100%;
+  max-width: 480px;
+  background: #171715;
+  border: 1px solid #B58B53;
+  border-radius: 12px;
+  padding: 16px 18px;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(181, 139, 83, 0.2);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-sizing: border-box;
+  animation: mechanical-slide 180ms ease-out both;
+}
+
+.response-notice-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.response-notice-card__title-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.response-notice-card__brass-indicator {
+  width: 3px;
+  height: 20px;
+  background: #B58B53;
+  border-radius: 1.5px;
+  flex-shrink: 0;
+}
+
+.response-notice-card__text-block {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.response-notice-card__title {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #E8E1D5;
+  line-height: 1.2;
+}
+
+.response-notice-card__subtitle {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: #B58B53;
+  text-transform: uppercase;
+}
+
+.response-notice-card__body {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #22211E;
+  border: 1px solid #34312B;
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.response-notice-card__icon-box {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  background: rgba(181, 139, 83, 0.12);
+  border: 1px solid rgba(181, 139, 83, 0.3);
+  flex-shrink: 0;
+}
+
+.response-notice-card__desc {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.response-notice-card__main-text {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 600;
+  color: #E8E1D5;
+}
+
+.response-notice-card__sub-text {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: #A59C8F;
+}
+
+.response-notice-card__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.response-notice-btn {
+  background: #2B2924;
+  border: 1px solid #34312B;
+  color: #E8E1D5;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.response-notice-btn:hover {
+  background: #34312B;
+  border-color: #746B5D;
+}
+
 .island-app-container {
   width: 100%;
   height: 100%;

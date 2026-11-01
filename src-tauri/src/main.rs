@@ -87,6 +87,7 @@ fn main() {
             commands::toggle_island,
             commands::close_island,
             commands::toggle_monitoring,
+            commands::test_response_notification,
         ])
         .setup(move |app| {
             let app_handle = app.handle().clone();
@@ -218,6 +219,9 @@ fn main() {
                     "quit" => {
                         info!("Quit requested via tray menu. Stopping service and exiting Switchplate.");
                         let _ = std::process::Command::new("systemctl")
+                            .args(["--user", "stop", "switchplate.service"])
+                            .status();
+                        let _ = std::process::Command::new("systemctl")
                             .args(["--user", "stop", "opencode-notch.service"])
                             .status();
                         std::process::exit(0);
@@ -232,13 +236,17 @@ fn main() {
                     } = event
                     {
                         let app = tray.app_handle();
-                        if let Some(settings_win) = app.get_webview_window("settings") {
-                            let is_visible = settings_win.is_visible().unwrap_or(false);
+                        if let Some(win) = app.get_webview_window("island") {
+                            let is_visible = win.is_visible().unwrap_or(false);
                             if is_visible {
-                                let _ = settings_win.hide();
+                                let _ = win.hide();
+                                let _ = app.emit("island-closed", ());
                             } else {
-                                let _ = settings_win.show();
-                                let _ = settings_win.set_focus();
+                                let _ = win.unminimize();
+                                let _ = win.show();
+                                let _ = win.set_always_on_top(true);
+                                let _ = win.set_focus();
+                                let _ = app.emit("open-island", ());
                             }
                         }
                     }
@@ -457,6 +465,20 @@ async fn process_event_stream(
                     }
                 }
                 emit_state_changed(app_handle, state).await;
+            }
+            OpenCodeEvent::SessionIdle(_)
+            | OpenCodeEvent::MessageCompleted(_)
+            | OpenCodeEvent::TurnCompleted(_)
+            | OpenCodeEvent::ResponseCompleted(_) => {
+                info!("AI response generation completed");
+                let _ = app_handle.emit("response-completed", ());
+                if let Some(win) = app_handle.get_webview_window("island") {
+                    let cfg = config_state.read().await;
+                    resize_and_position(&win, &cfg, true, true);
+                    let _ = win.unminimize();
+                    let _ = win.show();
+                    let _ = win.set_always_on_top(true);
+                }
             }
             OpenCodeEvent::Unknown => {}
         }

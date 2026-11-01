@@ -44,3 +44,7 @@ export async function closeIsland(): Promise<void> {
 export async function toggleMonitoring(): Promise<boolean> {
   return await invoke<boolean>("toggle_monitoring");
 }
+
+export async function testResponseNotification(): Promise<void> {
+  await invoke("test_response_notification");
+}

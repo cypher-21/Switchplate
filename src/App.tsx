@@ -14,7 +14,8 @@ import {
 import IslandPill from "./components/IslandPill";
 import ApprovalCard from "./components/ApprovalCard";
 import SettingsWindow from "./components/SettingsWindow";
-import { playRequestChime } from "./lib/sound";
+import ResponseNotice from "./components/ResponseNotice";
+import { playRequestChime, playCompletionChime } from "./lib/sound";
 import "./styles/approval-card.css";
 
 const DEFAULT_STATE: NotchState = {
@@ -67,6 +68,8 @@ const App: Component = () => {
   const [state, setState] = createSignal<NotchState>(DEFAULT_STATE);
   const [config, setConfig] = createSignal<Config>(DEFAULT_CONFIG);
   const [previewMode, setPreviewMode] = createSignal(false);
+  const [responseNotice, setResponseNotice] = createSignal(false);
+  let responseNoticeTimer: number | null = null;
 
   let isSettingsWindow = false;
   try {
@@ -173,10 +176,29 @@ const App: Component = () => {
       });
     });
 
+    const unlistenResponse = await listen("response-completed", () => {
+      setResponseNotice(true);
+      if (config().behavior.sound_enabled) {
+        playCompletionChime();
+      }
+      if (responseNoticeTimer) window.clearTimeout(responseNoticeTimer);
+      responseNoticeTimer = window.setTimeout(() => {
+        setResponseNotice(false);
+        if (!hasRealPending()) {
+          closeIsland();
+        }
+      }, 5000);
+    });
+
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         if (isSettingsWindow) {
           closeSettingsWindow();
+        } else if (responseNotice()) {
+          setResponseNotice(false);
+          if (!hasRealPending()) {
+            closeIsland();
+          }
         } else if (previewMode()) {
           setPreviewMode(false);
           if (!hasRealPending()) {
@@ -188,11 +210,13 @@ const App: Component = () => {
     window.addEventListener("keydown", handleKeyDown);
 
     onCleanup(() => {
+      if (responseNoticeTimer) window.clearTimeout(responseNoticeTimer);
       unlistenState();
       unlistenConfig();
       unlistenOpen();
       unlistenClose();
       unlistenPreview();
+      unlistenResponse();
       window.removeEventListener("keydown", handleKeyDown);
     });
   });
@@ -213,26 +237,40 @@ const App: Component = () => {
   return (
     <div class="island-app-container">
       <Show
-        when={isCardVisible()}
+        when={responseNotice() && !hasRealPending()}
         fallback={
-          <Show when={!config().behavior.only_show_on_request}>
-            <IslandPill
-              status={connectionStatus()}
-              onClick={() => setPreviewMode(!previewMode())}
+          <Show
+            when={isCardVisible()}
+            fallback={
+              <Show when={!config().behavior.only_show_on_request}>
+                <IslandPill
+                  status={connectionStatus()}
+                  onClick={() => setPreviewMode(!previewMode())}
+                  onOpenSettings={openSettingsWindow}
+                />
+              </Show>
+            }
+          >
+            <ApprovalCard
+              request={currentRequest()!}
+              queueCount={queueCount()}
+              config={config()}
+              isPreview={previewMode() && !hasRealPending()}
+              onRespond={handleRespond}
               onOpenSettings={openSettingsWindow}
+              onDismiss={() => {
+                setPreviewMode(false);
+                if (!hasRealPending()) {
+                  closeIsland();
+                }
+              }}
             />
           </Show>
         }
       >
-        <ApprovalCard
-          request={currentRequest()!}
-          queueCount={queueCount()}
-          config={config()}
-          isPreview={previewMode() && !hasRealPending()}
-          onRespond={handleRespond}
-          onOpenSettings={openSettingsWindow}
+        <ResponseNotice
           onDismiss={() => {
-            setPreviewMode(false);
+            setResponseNotice(false);
             if (!hasRealPending()) {
               closeIsland();
             }

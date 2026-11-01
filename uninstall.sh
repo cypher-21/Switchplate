@@ -1,35 +1,48 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "Stopping and disabling background service..."
+echo "Stopping and disabling background services..."
 if command -v systemctl >/dev/null 2>&1; then
+  systemctl --user stop switchplate.service 2>/dev/null || true
+  systemctl --user disable switchplate.service 2>/dev/null || true
+  rm -f "${HOME}/.config/systemd/user/switchplate.service"
+  rm -f "${HOME}/.config/systemd/user/default.target.wants/switchplate.service"
+
   systemctl --user stop opencode-notch.service 2>/dev/null || true
   systemctl --user disable opencode-notch.service 2>/dev/null || true
   rm -f "${HOME}/.config/systemd/user/opencode-notch.service"
   rm -f "${HOME}/.config/systemd/user/default.target.wants/opencode-notch.service"
+
   systemctl --user daemon-reload 2>/dev/null || true
 fi
 
 echo "Terminating any lingering processes..."
+pkill -9 -f switchplate 2>/dev/null || true
 pkill -9 -f opencode-notch 2>/dev/null || true
 
-echo "Removing installed binary..."
+echo "Removing installed binaries..."
+rm -f "${HOME}/.local/bin/switchplate"
+rm -f "${HOME}/.local/bin/switchplate.tmp"
 rm -f "${HOME}/.local/bin/opencode-notch"
 rm -f "${HOME}/.local/bin/opencode-notch.tmp"
 
 echo "Removing desktop entries and autostart..."
+rm -f "${HOME}/.local/share/applications/switchplate.desktop"
 rm -f "${HOME}/.local/share/applications/opencode-notch.desktop"
+rm -f "${HOME}/.config/autostart/switchplate.desktop"
 rm -f "${HOME}/.config/autostart/opencode-notch.desktop"
 
 echo "Removing application icons..."
+rm -f "${HOME}/.local/share/icons/hicolor/128x128/apps/switchplate.png"
+rm -f "${HOME}/.local/share/pixmaps/switchplate.png"
 rm -f "${HOME}/.local/share/icons/hicolor/128x128/apps/opencode-notch.png"
 rm -f "${HOME}/.local/share/pixmaps/opencode-notch.png"
 
 echo "Removing configuration and webview cache..."
 rm -rf "${HOME}/.config/switchplate"
 rm -rf "${HOME}/.config/opencode-notch"
-rm -rf "${HOME}/.local/share/dev.opencode.notch"
 rm -rf "${HOME}/.local/share/dev.switchplate.desktop"
+rm -rf "${HOME}/.local/share/dev.opencode.notch"
 
 echo "Updating desktop and icon caches..."
 if command -v update-desktop-database >/dev/null 2>&1; then
@@ -40,5 +53,4 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
   gtk-update-icon-cache -f -t "${HOME}/.local/share/icons/hicolor" 2>/dev/null || true
 fi
 
-echo "Uninstall complete. All old versions and components removed."
-
+echo "Uninstall complete. All Switchplate components removed."

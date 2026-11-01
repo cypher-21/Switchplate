@@ -1,7 +1,8 @@
 import { type Component, createSignal, onMount, onCleanup } from "solid-js";
+import { emit } from "@tauri-apps/api/event";
 import type { Config, NotchState } from "../lib/types";
 import SwitchplateIcon from "./SwitchplateIcon";
-import { playRequestChime } from "../lib/sound";
+import { playRequestChime, playCompletionChime } from "../lib/sound";
 
 interface SettingsWindowProps {
   config: Config;
@@ -371,6 +372,17 @@ const SettingsWindow: Component<SettingsWindowProps> = (props) => {
                     title="Test chime sound"
                   >
                     Test Sound
+                  </button>
+                  <button
+                    type="button"
+                    class="test-chime-btn"
+                    onClick={() => {
+                      playCompletionChime();
+                      emit("response-completed");
+                    }}
+                    title="Test response notification popup"
+                  >
+                    Test Popup
                   </button>
                   <label class="switch">
                     <input
