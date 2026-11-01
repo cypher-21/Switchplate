@@ -55,8 +55,8 @@ StartupWMClass=opencode-notch
 EOF
 chmod +x "${DESKTOP_DIR}/opencode-notch.desktop"
 
-# Set up desktop autostart
-cp -f "${DESKTOP_DIR}/opencode-notch.desktop" "${AUTOSTART_DIR}/opencode-notch.desktop"
+# Remove duplicate XDG autostart file to ensure only systemd manages the daemon
+rm -f "${AUTOSTART_DIR}/opencode-notch.desktop"
 
 # Update desktop and icon databases
 if command -v update-desktop-database >/dev/null 2>&1; then

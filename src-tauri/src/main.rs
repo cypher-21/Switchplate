@@ -52,6 +52,25 @@ fn main() {
     let config_state_for_setup = config_state.clone();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            info!(
+                "Another Switchplate instance was launched with args: {:?}. Focusing existing instance.",
+                args
+            );
+            if args.iter().any(|a| a == "--settings" || a == "-s") {
+                if let Some(win) = app.get_webview_window("settings") {
+                    let _ = win.unminimize();
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+            } else if let Some(win) = app.get_webview_window("island") {
+                let _ = win.unminimize();
+                let _ = win.show();
+                let _ = win.set_always_on_top(true);
+                let _ = win.set_focus();
+                let _ = app.emit("toggle-preview", ());
+            }
+        }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(app_state.clone())
         .manage(client_state.clone())
@@ -153,10 +172,6 @@ fn main() {
                         tauri::async_runtime::spawn(async move {
                             if let Some(win) = h.get_webview_window("island") {
                                 let cfg = cfg_state.read().await;
-                                let has_pending = {
-                                    let s = s_state.lock().await;
-                                    s.pending_count() > 0
-                                };
                                 resize_and_position(&win, &cfg, true);
                                 let _ = win.unminimize();
                                 let _ = win.show();
@@ -552,10 +567,6 @@ fn register_global_shortcuts(
                 let h = handle_o.clone();
                 tauri::async_runtime::spawn(async move {
                     let cfg = cfg_state.read().await;
-                    let has_pending = {
-                        let s = s_state.lock().await;
-                        s.pending_count() > 0
-                    };
                     resize_and_position(&win, &cfg, true);
                     let _ = win.unminimize();
                     let _ = win.show();
