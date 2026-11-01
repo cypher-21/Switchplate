@@ -55,3 +55,4 @@ const ResponseNotice: Component<ResponseNoticeProps> = (props) => {
 };
 
 export default ResponseNotice;
+
