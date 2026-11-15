@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 fn default_server_url() -> String {
     String::from("http://localhost:4096")
@@ -221,10 +221,44 @@ impl Config {
 
         if let Some(ref path) = primary_path {
             if path.exists() {
-                if let Ok(contents) = std::fs::read_to_string(path) {
-                    if let Ok(config) = toml::from_str::<Config>(&contents) {
-                        info!("Loaded Switchplate configuration from {}", path.display());
-                        return config;
+                match std::fs::read_to_string(path) {
+                    Ok(contents) => {
+                        match toml::from_str::<Config>(&contents) {
+                            Ok(config) => {
+                                info!("Loaded Switchplate configuration from {}", path.display());
+                                return config;
+                            }
+                            Err(parse_err) => {
+                                // File exists but is malformed — back it up, don't overwrite.
+                                error!(
+                                    "Failed to parse config at {}: {}. Using defaults in memory.",
+                                    path.display(),
+                                    parse_err
+                                );
+                                let backup_path = path.with_extension("toml.bak");
+                                match std::fs::copy(path, &backup_path) {
+                                    Ok(_) => warn!(
+                                        "Backed up malformed config to {}",
+                                        backup_path.display()
+                                    ),
+                                    Err(e) => warn!(
+                                        "Could not back up malformed config to {}: {}",
+                                        backup_path.display(),
+                                        e
+                                    ),
+                                }
+                                // Return defaults WITHOUT saving — preserve the (backed-up) file.
+                                return Self::default();
+                            }
+                        }
+                    }
+                    Err(read_err) => {
+                        error!(
+                            "Could not read config file at {}: {}. Using defaults.",
+                            path.display(),
+                            read_err
+                        );
+                        return Self::default();
                     }
                 }
             }
@@ -234,18 +268,48 @@ impl Config {
         if let Some(legacy_path) = Self::legacy_config_path() {
             if legacy_path.exists() {
                 info!("Found legacy config at {}. Migrating...", legacy_path.display());
-                if let Ok(contents) = std::fs::read_to_string(&legacy_path) {
-                    if let Ok(mut config) = toml::from_str::<Config>(&contents) {
-                        config.appearance.position = "top-center".to_string();
-                        config.appearance.theme = "industrial-swiss".to_string();
-                        let _ = config.save();
-                        return config;
+                match std::fs::read_to_string(&legacy_path) {
+                    Ok(contents) => {
+                        match toml::from_str::<Config>(&contents) {
+                            Ok(mut config) => {
+                                config.appearance.position = "top-center".to_string();
+                                config.appearance.theme = "industrial-swiss".to_string();
+                                let _ = config.save();
+                                return config;
+                            }
+                            Err(parse_err) => {
+                                error!(
+                                    "Failed to parse legacy config at {}: {}. Using defaults.",
+                                    legacy_path.display(),
+                                    parse_err
+                                );
+                                let backup_path = legacy_path.with_extension("toml.bak");
+                                match std::fs::copy(&legacy_path, &backup_path) {
+                                    Ok(_) => warn!(
+                                        "Backed up malformed legacy config to {}",
+                                        backup_path.display()
+                                    ),
+                                    Err(e) => warn!(
+                                        "Could not back up malformed legacy config: {}",
+                                        e
+                                    ),
+                                }
+                                // Fall through to create fresh defaults.
+                            }
+                        }
+                    }
+                    Err(read_err) => {
+                        warn!(
+                            "Could not read legacy config at {}: {}",
+                            legacy_path.display(),
+                            read_err
+                        );
                     }
                 }
             }
         }
 
-        // Create new default config
+        // No config file exists at all — create new default config and save it.
         let default_cfg = Self::default();
         let _ = default_cfg.save();
         default_cfg

@@ -232,37 +232,78 @@ impl OpenCodeClient {
         let response = target_response.ok_or_else(|| "Could not connect to SSE stream on any endpoint".to_string())?;
         let byte_stream = response.bytes_stream();
 
-        let event_stream = byte_stream
-            .map(|chunk_result| {
-                chunk_result
-                    .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
-                    .unwrap_or_default()
-            })
-            .flat_map(|text| {
-                let lines: Vec<String> = text.lines().map(String::from).collect();
-                futures_util::stream::iter(lines)
-            })
-            .filter_map(|line| async move {
-                let line = line.trim().to_string();
-                if let Some(data) = line.strip_prefix("data: ") {
-                    let data = data.trim();
-                    if data.is_empty() {
-                        return None;
-                    }
-                    match serde_json::from_str::<OpenCodeEvent>(data) {
-                        Ok(event) => {
-                            debug!("Parsed SSE event: {:?}", event);
-                            Some(event)
+        // Stateful byte-buffering SSE parser.
+        // Accumulates raw bytes across TCP chunks and only emits complete lines
+        // (terminated by \n). This prevents:
+        //   (a) Dropping events whose JSON payload is split across two TCP chunks.
+        //   (b) Corrupting multibyte UTF-8 codepoints split at a chunk boundary.
+        let event_stream = futures_util::stream::unfold(
+            (byte_stream, Vec::<u8>::new()),
+            |(mut stream, mut buf)| async move {
+                loop {
+                    // Drain all complete lines already sitting in the buffer.
+                    if let Some(newline_pos) = buf.iter().position(|&b| b == b'\n') {
+                        let line_bytes: Vec<u8> = buf.drain(..=newline_pos).collect();
+                        let line = String::from_utf8(line_bytes)
+                            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string());
+                        let line = line.trim().to_string();
+
+                        if let Some(data) = line.strip_prefix("data: ") {
+                            let data = data.trim();
+                            if data.is_empty() {
+                                continue; // Empty data field, skip
+                            }
+                            match serde_json::from_str::<OpenCodeEvent>(data) {
+                                Ok(event) => {
+                                    debug!("Parsed SSE event: {:?}", event);
+                                    return Some((event, (stream, buf)));
+                                }
+                                Err(e) => {
+                                    debug!("Failed to parse SSE event data: {} -- raw: {}", e, data);
+                                    continue; // Malformed JSON, skip this line
+                                }
+                            }
+                        } else {
+                            // Not a data: line (could be event:, id:, retry:, comment, or blank).
+                            // Per SSE spec, ignore these.
+                            continue;
                         }
-                        Err(e) => {
-                            debug!("Failed to parse SSE event data: {} -- raw: {}", e, data);
-                            None
+                    }
+
+                    // No complete line in buffer — pull the next chunk from the network.
+                    match stream.next().await {
+                        Some(Ok(bytes)) => {
+                            buf.extend_from_slice(&bytes);
+                            // Loop back to drain any complete lines from the enlarged buffer.
+                        }
+                        Some(Err(e)) => {
+                            debug!("SSE stream chunk error: {}", e);
+                            return None; // Network error, end the stream.
+                        }
+                        None => {
+                            // Stream ended. Flush any trailing data still in the buffer
+                            // (server may have closed without a final newline).
+                            if !buf.is_empty() {
+                                let remaining = std::mem::take(&mut buf);
+                                let line = String::from_utf8(remaining)
+                                    .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string());
+                                let line = line.trim().to_string();
+                                if let Some(data) = line.strip_prefix("data: ") {
+                                    let data = data.trim();
+                                    if !data.is_empty() {
+                                        if let Ok(event) = serde_json::from_str::<OpenCodeEvent>(data) {
+                                            debug!("Parsed final SSE event: {:?}", event);
+                                            return Some((event, (stream, buf)));
+                                        }
+                                    }
+                                }
+                            }
+                            return None; // Stream finished.
                         }
                     }
-                } else {
-                    None
                 }
-            });
+            },
+        );
 
         Ok(event_stream)
     }
