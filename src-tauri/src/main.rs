@@ -3,17 +3,20 @@
 mod commands;
 mod config;
 mod opencode;
+mod sound;
 mod state;
 mod window;
 
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
 use commands::{AppState, ClientState, ConfigState};
-use config::Config;
-use opencode::client::OpenCodeClient;
-use opencode::events::{Decision, OpenCodeEvent};
-use state::{ConnectionStatus, NotchState};
+use config::{Config, OpenCodeConfig};
+use opencode::client::{OpenCodeClient, PendingInputs};
+use opencode::events::{Decision, OpenCodeEvent, PermissionRequest, ResponseOutcome, ResponseTracker};
+use sound::Chime;
+use state::{ConnectionStatus, IslandContent, NotchState};
 use window::resize_and_position;
 
 use futures_util::StreamExt;
@@ -46,7 +49,7 @@ fn main() {
     let config = Config::load();
     let app_state: AppState = Arc::new(Mutex::new(NotchState::new()));
     let client_state: ClientState = Arc::new(Mutex::new(None));
-    let config_state: ConfigState = Arc::new(RwLock::new(config.clone()));
+    let config_state = ConfigState::new(config.clone());
 
     let config_for_setup = config.clone();
     let config_state_for_setup = config_state.clone();
@@ -88,6 +91,9 @@ fn main() {
             commands::close_island,
             commands::toggle_monitoring,
             commands::test_response_notification,
+            commands::test_notification_sound,
+            commands::dismiss_response_notice,
+            commands::reply_to_form,
         ])
         .setup(move |app| {
             let app_handle = app.handle().clone();
@@ -112,7 +118,7 @@ fn main() {
                     }
                 });
 
-                resize_and_position(&island_win, &config_for_setup, false, false);
+                resize_and_position(&island_win, &config_for_setup, IslandContent::Idle, false, false);
             } else {
                 warn!("Island window not found during setup");
             }
@@ -171,10 +177,12 @@ fn main() {
                     "open_island" => {
                         let h = handle_for_menu.clone();
                         let cfg_state = config_for_menu.clone();
+                        let state = state_for_menu.clone();
                         tauri::async_runtime::spawn(async move {
                             if let Some(win) = h.get_webview_window("island") {
-                                let cfg = cfg_state.read().await;
-                                resize_and_position(&win, &cfg, true, true);
+                                let cfg = cfg_state.borrow().clone();
+                                let content = state.lock().await.island_content();
+                                resize_and_position(&win, &cfg, content, true, true);
                                 let _ = win.unminimize();
                                 let _ = win.show();
                                 let _ = win.set_always_on_top(true);
@@ -299,16 +307,12 @@ async fn run_connection_loop(
     app_handle: tauri::AppHandle,
     status_item: tauri::menu::MenuItem<tauri::Wry>,
 ) {
+    let mut config_changes = config_state.subscribe();
     loop {
-        // Check if monitoring is paused
-        let is_paused = {
-            let guard = config_state.read().await;
-            guard.behavior.pause_monitoring
-        };
-
-        if is_paused {
+        let cfg = config_changes.borrow_and_update().clone();
+        if cfg.behavior.pause_monitoring {
             let _ = status_item.set_text("OpenCode: Paused");
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let _ = config_changes.changed().await;
             continue;
         }
 
@@ -320,13 +324,9 @@ async fn run_connection_loop(
         let _ = status_item.set_text("OpenCode: Connecting...");
         emit_state_changed(&app_handle, &state).await;
 
-        let cfg = {
-            let guard = config_state.read().await;
-            guard.clone()
-        };
-
         info!("Attempting to connect to OpenCode server...");
 
+        let mut reconnect_now = false;
         match OpenCodeClient::connect(&cfg).await {
             Ok(client) => {
                 info!("Connected to OpenCode server at {}", client.base_url());
@@ -338,29 +338,28 @@ async fn run_connection_loop(
                 }
 
                 let session_count = client.list_sessions().await.map(|s| s.len()).unwrap_or(0);
-                let initial_requests = client.fetch_pending_permissions().await.unwrap_or_default();
-
-                {
-                    let mut s = state.lock().await;
-                    s.connection = ConnectionStatus::Connected { session_count };
-                    for req in initial_requests {
-                        s.add_request(req);
-                    }
-                }
-                emit_state_changed(&app_handle, &state).await;
-                update_window_size(&app_handle, &state, &config_state).await;
-
                 match client.subscribe_events().await {
                     Ok(event_stream) => {
                         info!("Subscribed to OpenCode event stream");
-                        process_event_stream(
+                        // Subscribe before taking the snapshot so requests arriving
+                        // during startup are available through at least one path.
+                        let initial_inputs = client.fetch_pending_inputs().await;
+                        state.lock().await.connection =
+                            ConnectionStatus::Connected { session_count };
+                        emit_state_changed(&app_handle, &state).await;
+                        reconnect_now = process_event_stream(
                             event_stream,
+                            initial_inputs,
                             &state,
+                            &client_state,
                             &app_handle,
                             &config_state,
+                            &cfg.opencode,
                         )
                         .await;
-                        warn!("OpenCode event stream ended, will reconnect");
+                        if !reconnect_now {
+                            warn!("OpenCode event stream ended, will reconnect");
+                        }
                     }
                     Err(e) => {
                         error!("Failed to subscribe to OpenCode events: {}", e);
@@ -381,20 +380,22 @@ async fn run_connection_loop(
             let mut s = state.lock().await;
             s.connection = ConnectionStatus::Disconnected;
             s.pending_requests.clear();
+            s.pending_forms.clear();
         }
         let _ = status_item.set_text("OpenCode: Offline");
         emit_state_changed(&app_handle, &state).await;
+        update_window_size(&app_handle, &state, &config_state).await;
 
-        let auto_reconnect = {
-            let guard = config_state.read().await;
-            guard.opencode.auto_reconnect
-        };
-
-        if !auto_reconnect {
-            info!("Auto-reconnect disabled. Waiting 30s before retry.");
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        } else {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        if !reconnect_now {
+            let delay = if config_state.borrow().opencode.auto_reconnect {
+                5
+            } else {
+                30
+            };
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(delay)) => {},
+                _ = config_changes.wait_for(|config| config.behavior.pause_monitoring || config.opencode != cfg.opencode) => {},
+            }
         }
     }
 }
@@ -402,43 +403,118 @@ async fn run_connection_loop(
 /// Process incoming SSE events from the OpenCode server.
 async fn process_event_stream(
     event_stream: impl futures_util::Stream<Item = OpenCodeEvent>,
+    initial_inputs: PendingInputs,
     state: &AppState,
+    client: &ClientState,
     app_handle: &tauri::AppHandle,
     config_state: &ConfigState,
-) {
+    connected_config: &OpenCodeConfig,
+) -> bool {
     futures_util::pin_mut!(event_stream);
+    let mut config_changes = config_state.subscribe();
+    let config = config_changes.borrow().clone();
+    if config.behavior.pause_monitoring || &config.opencode != connected_config {
+        return true;
+    }
+    let mut approval_mode = config.behavior.auto_approval;
+    let mut recent_requests = VecDeque::new();
+    let mut seen_forms = HashSet::new();
+    let mut responses = ResponseTracker::default();
 
-    while let Some(event) = event_stream.next().await {
-        let is_paused = {
-            let guard = config_state.read().await;
-            guard.behavior.pause_monitoring
+    for request in initial_inputs.permissions {
+        handle_permission_request(request, &mut recent_requests, state, client, config_state).await;
+    }
+    {
+        let mut state = state.lock().await;
+        for form in initial_inputs.forms {
+            seen_forms.insert(form.key.clone());
+            state.add_form(form);
+        }
+    }
+    emit_state_changed(app_handle, state).await;
+    update_window_size(app_handle, state, config_state).await;
+    if config_state.borrow().behavior.sound_enabled {
+        let state = state.lock().await;
+        if state.current_request().is_some() {
+            sound::play(Chime::Request);
+        } else if !state.pending_forms.is_empty() {
+            sound::play(Chime::Question);
+        }
+    }
+
+    loop {
+        let cfg = config_changes.borrow_and_update().clone();
+        if cfg.behavior.pause_monitoring || &cfg.opencode != connected_config {
+            return true;
+        }
+
+        if cfg.behavior.auto_approval != approval_mode {
+            approval_mode = cfg.behavior.auto_approval;
+            if cfg.behavior.automatic_decision().is_some() {
+                approve_pending_requests(state, client, app_handle, config_state).await;
+                continue;
+            }
+        }
+
+        let event = tokio::select! {
+            biased;
+            _ = config_changes.changed() => continue,
+            event = event_stream.next() => match event {
+                Some(event) => event,
+                None => return false,
+            },
         };
-        if is_paused {
-            continue;
+
+        if let Some(outcome) = responses.observe(&event) {
+            info!("OpenCode response finished: {:?}", outcome);
+            let play_sound = config_state.borrow().behavior.sound_enabled;
+            show_response_notice(app_handle, state, config_state, outcome, play_sound).await;
         }
 
         match event {
             OpenCodeEvent::PermissionAsked(payload) => {
                 if let Some(req) = payload.into_permission_request() {
-                    info!("Permission requested: {} (tool: {})", req.id, req.tool);
+                    if handle_permission_request(
+                        req,
+                        &mut recent_requests,
+                        state,
+                        client,
+                        config_state,
+                    )
+                    .await
                     {
-                        let mut s = state.lock().await;
-                        s.add_request(req);
+                        emit_state_changed(app_handle, state).await;
+                        update_window_size(app_handle, state, config_state).await;
+                        if config_state.borrow().behavior.sound_enabled {
+                            sound::play(Chime::Request);
+                        }
                     }
-                    emit_state_changed(app_handle, state).await;
-                    update_window_size(app_handle, state, config_state).await;
                 }
             }
             OpenCodeEvent::PermissionReplied(payload) => {
                 let req_id = payload.request_id();
                 let decision = payload.decision_str();
                 info!("Permission replied: {} -> {}", req_id, decision);
-                {
-                    let mut s = state.lock().await;
-                    s.remove_request(&req_id);
+                if state.lock().await.remove_request(&req_id).is_some() {
+                    emit_state_changed(app_handle, state).await;
+                    update_window_size(app_handle, state, config_state).await;
                 }
-                emit_state_changed(app_handle, state).await;
-                update_window_size(app_handle, state, config_state).await;
+            }
+            OpenCodeEvent::FormCreated(event) => {
+                let form = event.data.form;
+                if seen_forms.insert(form.key.clone()) && state.lock().await.add_form(form) {
+                    emit_state_changed(app_handle, state).await;
+                    update_window_size(app_handle, state, config_state).await;
+                    if config_state.borrow().behavior.sound_enabled {
+                        sound::play(Chime::Question);
+                    }
+                }
+            }
+            OpenCodeEvent::FormSettled(event) => {
+                if state.lock().await.remove_form(&event.data) {
+                    emit_state_changed(app_handle, state).await;
+                    update_window_size(app_handle, state, config_state).await;
+                }
             }
             OpenCodeEvent::SessionCreated(session) => {
                 info!("Session created: {}", session.session_id());
@@ -454,8 +530,9 @@ async fn process_event_stream(
                 emit_state_changed(app_handle, state).await;
             }
             OpenCodeEvent::SessionEnded(session) | OpenCodeEvent::SessionDeleted(session) => {
-                info!("Session ended: {}", session.session_id());
-                {
+                let session_id = session.session_id();
+                info!("Session ended: {session_id}");
+                let forms_removed = {
                     let mut s = state.lock().await;
                     if let ConnectionStatus::Connected {
                         ref mut session_count,
@@ -463,35 +540,135 @@ async fn process_event_stream(
                     {
                         *session_count = session_count.saturating_sub(1);
                     }
-                }
+                    let previous_count = s.pending_forms.len();
+                    s.pending_forms.retain(|form| form.key.session_id != session_id);
+                    s.pending_forms.len() != previous_count
+                };
                 emit_state_changed(app_handle, state).await;
-            }
-            OpenCodeEvent::SessionIdle(_)
-            | OpenCodeEvent::MessageCompleted(_)
-            | OpenCodeEvent::TurnCompleted(_)
-            | OpenCodeEvent::ResponseCompleted(_) => {
-                info!("AI response generation completed");
-                let _ = app_handle.emit("response-completed", ());
-                if let Some(win) = app_handle.get_webview_window("island") {
-                    let cfg = config_state.read().await;
-                    resize_and_position(&win, &cfg, true, true);
-                    let _ = win.unminimize();
-                    let _ = win.show();
-                    let _ = win.set_always_on_top(true);
+                if forms_removed {
+                    update_window_size(app_handle, state, config_state).await;
                 }
             }
-            OpenCodeEvent::Unknown => {}
+            _ => {}
         }
+    }
+}
+
+/// Route both snapshot and streamed requests through the saved approval mode.
+async fn handle_permission_request(
+    request: PermissionRequest,
+    recent_requests: &mut VecDeque<String>,
+    state: &AppState,
+    client: &ClientState,
+    config: &ConfigState,
+) -> bool {
+    if request.id.is_empty() || recent_requests.contains(&request.id) {
+        return false;
+    }
+    // An ask can appear both in the startup snapshot and on the live stream.
+    recent_requests.push_back(request.id.clone());
+    if recent_requests.len() > 1024 {
+        recent_requests.pop_front();
+    }
+
+    info!(
+        "Permission requested: {} (tool: {})",
+        request.id, request.tool
+    );
+    if config.borrow().behavior.automatic_decision().is_some() {
+        let client = client.lock().await;
+        if let Some(client) = client.as_ref() {
+            let cfg = config.borrow().clone();
+            match client.auto_approve(&request, &cfg).await {
+                Ok(true) => return false,
+                Ok(false) => {}
+                Err(error) => warn!("Automatic reply failed for {}: {error}", request.id),
+            }
+        }
+    }
+    state.lock().await.add_request(request)
+}
+
+/// Apply a newly saved automatic mode to requests already waiting for review.
+async fn approve_pending_requests(
+    state: &AppState,
+    client: &ClientState,
+    app_handle: &tauri::AppHandle,
+    config: &ConfigState,
+) {
+    let ids: Vec<_> = state
+        .lock()
+        .await
+        .pending_requests
+        .iter()
+        .map(|request| request.id.clone())
+        .collect();
+    for id in ids {
+        match reply_to_pending_request(state, client, config, &id, None).await {
+            Ok(true) => {
+                emit_state_changed(app_handle, state).await;
+                update_window_size(app_handle, state, config).await;
+            }
+            Ok(false) => {}
+            Err(error) => warn!("Automatic reply failed for {id}: {error}"),
+        }
+    }
+}
+
+/// Serialize local replies so manual and automatic actions cannot answer the same request.
+async fn reply_to_pending_request(
+    state: &AppState,
+    client_state: &ClientState,
+    config: &ConfigState,
+    request_id: &str,
+    manual_decision: Option<Decision>,
+) -> Result<bool, String> {
+    let client = client_state.lock().await;
+    let Some(request) = state
+        .lock()
+        .await
+        .pending_requests
+        .iter()
+        .find(|request| request.id == request_id)
+        .cloned()
+    else {
+        return Ok(false);
+    };
+    let client = client.as_ref().ok_or("Not connected to OpenCode server")?;
+    if let Some(decision) = manual_decision {
+        client.respond_permission(&request, decision).await?;
+    } else {
+        let cfg = config.borrow().clone();
+        if !client.auto_approve(&request, &cfg).await? {
+            return Ok(false);
+        }
+    }
+    state.lock().await.remove_request(request_id);
+    if let Some(decision) = manual_decision.filter(|_| config.borrow().behavior.sound_enabled) {
+        sound::play(if decision == Decision::Deny { Chime::Reject } else { Chime::Approve });
+    }
+    Ok(true)
+}
+
+async fn show_response_notice(
+    app_handle: &tauri::AppHandle,
+    state: &AppState,
+    config: &ConfigState,
+    outcome: ResponseOutcome,
+    play_sound: bool,
+) {
+    state.lock().await.add_response_notice(outcome);
+    emit_state_changed(app_handle, state).await;
+    update_window_size(app_handle, state, config).await;
+    if play_sound {
+        sound::play(if outcome == ResponseOutcome::Ready { Chime::Completion } else { Chime::Reject });
     }
 }
 
 /// Emit "state-changed" event to frontend with current state.
 async fn emit_state_changed(app_handle: &tauri::AppHandle, state: &AppState) {
-    let current_state = {
-        let s = state.lock().await;
-        s.clone()
-    };
-    if let Err(e) = app_handle.emit("state-changed", &current_state) {
+    let current_state = state.lock().await;
+    if let Err(e) = app_handle.emit("state-changed", &*current_state) {
         error!("Failed to emit state-changed event: {}", e);
     }
 }
@@ -502,13 +679,10 @@ async fn update_window_size(
     state: &AppState,
     config_state: &ConfigState,
 ) {
-    let has_pending = {
-        let s = state.lock().await;
-        s.pending_count() > 0
-    };
-    let cfg = config_state.read().await;
+    let state = state.lock().await;
+    let cfg = config_state.borrow().clone();
     if let Some(window) = app_handle.get_webview_window("island") {
-        resize_and_position(&window, &cfg, has_pending, false);
+        resize_and_position(&window, &cfg, state.island_content(), false, state.current_request().is_some());
     }
 }
 
@@ -539,6 +713,7 @@ fn register_global_shortcuts(
 
     let config_o = config_state.clone();
     let handle_o = handle.clone();
+    let state_o = state.clone();
 
     let handle_s = handle.clone();
 
@@ -586,6 +761,7 @@ fn register_global_shortcuts(
         if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
             if let Some(window) = handle_o.get_webview_window("island") {
                 let cfg_state = config_o.clone();
+                let state = state_o.clone();
                 let win = window.clone();
                 let h = handle_o.clone();
                 tauri::async_runtime::spawn(async move {
@@ -594,8 +770,9 @@ fn register_global_shortcuts(
                         let _ = win.hide();
                         let _ = h.emit("island-closed", ());
                     } else {
-                        let cfg = cfg_state.read().await;
-                        resize_and_position(&win, &cfg, true, true);
+                        let cfg = cfg_state.borrow().clone();
+                        let content = state.lock().await.island_content();
+                        resize_and_position(&win, &cfg, content, true, true);
                         let _ = win.unminimize();
                         let _ = win.show();
                         let _ = win.set_always_on_top(true);
@@ -631,33 +808,60 @@ async fn handle_shortcut_decision(
     config_state: ConfigState,
     decision: Decision,
 ) {
-    let (request_id, session_id) = {
+    let request_id = {
         let s = state.lock().await;
         match s.current_request() {
-            Some(r) => (r.id.clone(), Some(r.session_id.clone())),
+            Some(r) => r.id.clone(),
             None => return,
         }
     };
 
-    let client_guard = client_state.lock().await;
-    let Some(ref client) = *client_guard else {
-        warn!("Cannot respond: not connected to OpenCode server");
-        return;
-    };
-
-    match client.respond_permission(&request_id, session_id.as_deref(), decision).await {
-        Ok(()) => {
+    match reply_to_pending_request(
+        &state,
+        &client_state,
+        &config_state,
+        &request_id,
+        Some(decision),
+    )
+    .await
+    {
+        Ok(true) => {
             info!("Permission {} responded via shortcut", request_id);
-            drop(client_guard);
-            {
-                let mut s = state.lock().await;
-                s.remove_request(&request_id);
-            }
             emit_state_changed(&app_handle, &state).await;
             update_window_size(&app_handle, &state, &config_state).await;
         }
+        Ok(false) => {}
         Err(e) => {
             error!("Failed to respond to permission {}: {}", request_id, e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use config::AutoApproval;
+
+    #[tokio::test]
+    async fn unavailable_automatic_reply_queues_one_copy_for_manual_review() {
+        let state = Arc::new(Mutex::new(NotchState::new()));
+        let client = Arc::new(Mutex::new(None));
+        let mut config = Config::default();
+        config.behavior.auto_approval = AutoApproval::AllowOnce;
+        let config = ConfigState::new(config);
+        let mut recent = VecDeque::new();
+        let request = PermissionRequest {
+            id: "per_example".into(),
+            tool: "shell".into(),
+            args: serde_json::json!(["git status"]),
+            session_id: "ses_example".into(),
+            timestamp: String::new(),
+        };
+
+        assert!(
+            handle_permission_request(request.clone(), &mut recent, &state, &client, &config).await
+        );
+        assert!(!handle_permission_request(request, &mut recent, &state, &client, &config).await);
+        assert_eq!(state.lock().await.pending_requests.len(), 1);
     }
 }

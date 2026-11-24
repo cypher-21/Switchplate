@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::{error, info, warn};
 
+use crate::opencode::events::Decision;
+
 fn default_server_url() -> String {
     String::from("http://localhost:4096")
 }
@@ -88,7 +90,7 @@ pub struct Config {
 }
 
 /// Configuration for connecting to the OpenCode server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenCodeConfig {
     #[serde(default = "default_server_url")]
     pub server_url: String,
@@ -131,10 +133,35 @@ pub struct BehaviorConfig {
     pub only_show_on_request: bool,
     #[serde(default = "default_false")]
     pub pause_monitoring: bool,
+    #[serde(default)]
+    pub auto_approval: AutoApproval,
     #[serde(default = "default_true")]
     pub sound_enabled: bool,
     #[serde(default = "default_true")]
     pub autostart: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoApproval {
+    #[default]
+    Manual,
+    AllowOnce,
+    AlwaysAllow,
+}
+
+impl BehaviorConfig {
+    pub fn automatic_decision(&self) -> Option<Decision> {
+        if self.pause_monitoring {
+            return None;
+        }
+
+        match self.auto_approval {
+            AutoApproval::Manual => None,
+            AutoApproval::AllowOnce => Some(Decision::Allow),
+            AutoApproval::AlwaysAllow => Some(Decision::Always),
+        }
+    }
 }
 
 /// Global keyboard shortcuts.
@@ -195,7 +222,8 @@ impl Default for BehaviorConfig {
         Self {
             only_show_on_request: default_true(),
             pause_monitoring: default_false(),
-            sound_enabled: default_false(),
+            auto_approval: AutoApproval::default(),
+            sound_enabled: default_true(),
             autostart: default_true(),
         }
     }
@@ -317,78 +345,22 @@ impl Config {
 
     /// Save configuration to ~/.config/switchplate/config.toml.
     pub fn save(&self) -> Result<(), String> {
-        let path = Self::config_path().ok_or_else(|| "Could not determine config path".to_string())?;
-        self.save_to_path(&path);
-        Ok(())
-    }
+        let path =
+            Self::config_path().ok_or_else(|| "Could not determine config path".to_string())?;
+        let contents = toml::to_string_pretty(self)
+            .map_err(|e| format!("Could not serialize configuration: {e}"))?;
+        let contents = format!("# SWITCHPLATE — Configuration\n\n{contents}");
+        let write_config = || -> std::io::Result<()> {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let temporary_path = path.with_extension(format!("{}.tmp", std::process::id()));
+            std::fs::write(&temporary_path, contents)?;
+            std::fs::rename(&temporary_path, &path)
+        };
 
-    fn save_to_path(&self, path: &PathBuf) {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-
-        let toml_content = format!(
-r#"# SWITCHPLATE — Configuration
-# Your control surface for OpenCode.
-# Location: ~/.config/switchplate/config.toml
-
-[opencode]
-server_url = "{server_url}"
-password_env = "{password_env}"
-request_timeout = {request_timeout}
-auto_reconnect = {auto_reconnect}
-
-[appearance]
-position = "{position}"
-offset_x = {offset_x}
-offset_y = {offset_y}
-card_width = {card_width}
-card_height = {card_height}
-collapsed_width = {collapsed_width}
-collapsed_height = {collapsed_height}
-theme = "{theme}"
-reduced_motion = {reduced_motion}
-
-[behavior]
-only_show_on_request = {only_show_on_request}
-pause_monitoring = {pause_monitoring}
-sound_enabled = {sound_enabled}
-autostart = {autostart}
-
-[shortcuts]
-open_island = "{open_island}"
-accept = "{accept}"
-deny = "{deny}"
-always = "{always}"
-open_settings = "{open_settings}"
-"#,
-            server_url = self.opencode.server_url,
-            password_env = self.opencode.password_env,
-            request_timeout = self.opencode.request_timeout,
-            auto_reconnect = self.opencode.auto_reconnect,
-            position = self.appearance.position,
-            offset_x = self.appearance.offset_x,
-            offset_y = self.appearance.offset_y,
-            card_width = self.appearance.card_width,
-            card_height = self.appearance.card_height,
-            collapsed_width = self.appearance.collapsed_width,
-            collapsed_height = self.appearance.collapsed_height,
-            theme = self.appearance.theme,
-            reduced_motion = self.appearance.reduced_motion,
-            only_show_on_request = self.behavior.only_show_on_request,
-            pause_monitoring = self.behavior.pause_monitoring,
-            sound_enabled = self.behavior.sound_enabled,
-            autostart = self.behavior.autostart,
-            open_island = self.shortcuts.open_island,
-            accept = self.shortcuts.accept,
-            deny = self.shortcuts.deny,
-            always = self.shortcuts.always,
-            open_settings = self.shortcuts.open_settings,
-        );
-
-        if let Err(e) = std::fs::write(path, toml_content) {
-            warn!("Failed to write config file to {}: {}", path.display(), e);
-        }
+        write_config()
+            .map_err(|e| format!("Could not save configuration to {}: {e}", path.display()))
     }
 
     /// Primary config path: ~/.config/switchplate/config.toml
@@ -406,5 +378,32 @@ open_settings = "{open_settings}"
         std::env::var(&self.opencode.password_env)
             .or_else(|_| std::env::var("OPENCODE_SERVER_PASSWORD"))
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn older_configs_require_manual_approval() {
+        let config: Config = toml::from_str("[behavior]\nsound_enabled = false").unwrap();
+        assert_eq!(config.behavior.auto_approval, AutoApproval::Manual);
+        assert_eq!(config.behavior.automatic_decision(), None);
+    }
+
+    #[test]
+    fn automatic_modes_round_trip_and_respect_pause() {
+        for (mode, decision) in [
+            (AutoApproval::AllowOnce, Decision::Allow),
+            (AutoApproval::AlwaysAllow, Decision::Always),
+        ] {
+            let mut config = Config::default();
+            config.behavior.auto_approval = mode;
+            let mut restored: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+            assert_eq!(restored.behavior.automatic_decision(), Some(decision));
+            restored.behavior.pause_monitoring = true;
+            assert_eq!(restored.behavior.automatic_decision(), None);
+        }
     }
 }

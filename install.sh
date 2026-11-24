@@ -8,6 +8,13 @@ ICON_DIR="${HOME}/.local/share/icons/hicolor/128x128/apps"
 PIXMAPS_DIR="${HOME}/.local/share/pixmaps"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_PATH="${PROJECT_DIR}/src-tauri/target/release/switchplate"
+ICON_PATH="${PROJECT_DIR}/src-tauri/icons/128x128.png"
+
+# Standalone release archive layout.
+if [ -x "${PROJECT_DIR}/switchplate" ]; then
+  BIN_PATH="${PROJECT_DIR}/switchplate"
+  ICON_PATH="${PROJECT_DIR}/icons/switchplate.png"
+fi
 
 # Fallback check if compiled under legacy name
 if [ ! -f "${BIN_PATH}" ] && [ -f "${PROJECT_DIR}/src-tauri/target/release/opencode-notch" ]; then
@@ -46,8 +53,8 @@ chmod +x "${INSTALL_DIR}/switchplate"
 ln -sf "${INSTALL_DIR}/switchplate" "${INSTALL_DIR}/opencode-notch"
 
 # Install icons to standard XDG directories
-cp -f "${PROJECT_DIR}/src-tauri/icons/128x128.png" "${ICON_DIR}/switchplate.png"
-cp -f "${PROJECT_DIR}/src-tauri/icons/128x128.png" "${PIXMAPS_DIR}/switchplate.png"
+cp -f "${ICON_PATH}" "${ICON_DIR}/switchplate.png"
+cp -f "${ICON_PATH}" "${PIXMAPS_DIR}/switchplate.png"
 ln -sf "${ICON_DIR}/switchplate.png" "${ICON_DIR}/opencode-notch.png"
 ln -sf "${PIXMAPS_DIR}/switchplate.png" "${PIXMAPS_DIR}/opencode-notch.png"
 

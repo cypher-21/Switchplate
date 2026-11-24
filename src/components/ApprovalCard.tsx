@@ -1,14 +1,11 @@
 import { type Component } from "solid-js";
-import type { PermissionRequest, Decision, Config } from "../lib/types";
+import type { PermissionRequest, Decision } from "../lib/types";
 import ActionButtons from "./ActionButtons";
 import QueueBadge from "./QueueBadge";
-import { playApproveChime, playRejectChime } from "../lib/sound";
 
 interface ApprovalCardProps {
   request: PermissionRequest;
   queueCount: number;
-  config: Config;
-  isPreview?: boolean;
   onRespond: (decision: Decision) => void;
   onOpenSettings?: () => void;
   onDismiss?: () => void;
@@ -39,17 +36,6 @@ const ApprovalCard: Component<ApprovalCardProps> = (props) => {
     const t = props.request.tool.toUpperCase();
     if (t === "BASH") return "SHELL";
     return t;
-  };
-
-  const handleAction = (decision: Decision) => {
-    if (props.config.behavior.sound_enabled) {
-      if (decision === "deny" || decision === "reject") {
-        playRejectChime();
-      } else {
-        playApproveChime();
-      }
-    }
-    props.onRespond(decision);
   };
 
   return (
@@ -103,7 +89,7 @@ const ApprovalCard: Component<ApprovalCardProps> = (props) => {
       </div>
 
       {/* Action Buttons Row */}
-      <ActionButtons onRespond={handleAction} />
+      <ActionButtons onRespond={props.onRespond} />
     </div>
   );
 };

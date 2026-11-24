@@ -1,16 +1,17 @@
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
-use tracing::error;
+use tokio::sync::{watch, Mutex};
 
 use crate::config::Config;
-use crate::opencode::client::OpenCodeClient;
-use crate::opencode::events::Decision;
+use crate::opencode::client::{FormReply, OpenCodeClient};
+use crate::opencode::events::{Decision, ResponseOutcome};
+use crate::opencode::forms::{FormAnswer, FormId};
+use crate::sound::{self, Chime};
 use crate::state::NotchState;
 use tauri::{Emitter, Manager};
 
 pub type AppState = Arc<Mutex<NotchState>>;
 pub type ClientState = Arc<Mutex<Option<OpenCodeClient>>>;
-pub type ConfigState = Arc<RwLock<Config>>;
+pub type ConfigState = watch::Sender<Config>;
 
 /// IPC command: get current state.
 #[tauri::command]
@@ -29,55 +30,65 @@ pub async fn respond_permission(
     config: tauri::State<'_, ConfigState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    let parsed_decision = Decision::from_str_loose(&decision)
-        .ok_or_else(|| format!("Invalid decision '{}': expected allow, deny, or always", decision))?;
+    let parsed_decision = Decision::from_str_loose(&decision).ok_or_else(|| {
+        format!(
+            "Invalid decision '{}': expected allow, deny, or always",
+            decision
+        )
+    })?;
 
-    let session_id = {
-        let state_guard = state.lock().await;
-        state_guard
-            .pending_requests
-            .iter()
-            .find(|r| r.id == request_id)
-            .map(|r| r.session_id.clone())
-    };
-
-    let client_guard = client.lock().await;
-    let opencode_client = client_guard
-        .as_ref()
-        .ok_or_else(|| "Not connected to OpenCode server".to_string())?;
-
-    opencode_client
-        .respond_permission(&request_id, session_id.as_deref(), parsed_decision)
-        .await?;
-
-    drop(client_guard);
-
-    // Remove the request from local state immediately
-    let (has_pending, current_state) = {
-        let mut state_guard = state.lock().await;
-        if state_guard.remove_request(&request_id).is_none() {
-            error!("Permission request {} was not found in pending queue", request_id);
-        }
-        (state_guard.pending_count() > 0, state_guard.clone())
-    };
-
-    // Emit state update immediately to frontend
-    let _ = app_handle.emit("state-changed", &current_state);
-
-    // Immediately update island window size/visibility
-    let cfg_guard = config.read().await;
-    if let Some(window) = app_handle.get_webview_window("island") {
-        crate::window::resize_and_position(&window, &cfg_guard, has_pending, false);
+    if crate::reply_to_pending_request(&state, &client, &config, &request_id, Some(parsed_decision))
+        .await?
+    {
+        crate::emit_state_changed(&app_handle, &state).await;
+        crate::update_window_size(&app_handle, &state, &config).await;
     }
 
     Ok(())
 }
 
+#[tauri::command]
+pub async fn reply_to_form(
+    form: FormId,
+    answer: FormAnswer,
+    state: tauri::State<'_, AppState>,
+    client: tauri::State<'_, ClientState>,
+    config: tauri::State<'_, ConfigState>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let client = client.lock().await;
+    if !state
+        .lock()
+        .await
+        .pending_forms
+        .iter()
+        .any(|pending| pending.key == form)
+    {
+        return Err("This question has already closed.".into());
+    }
+    let server = client
+        .as_ref()
+        .ok_or("OpenCode is disconnected. Try again after reconnecting.")?;
+    let reply = server.reply_to_form(&form, answer).await?;
+    let removed = state.lock().await.remove_form(&form);
+    drop(client);
+
+    if removed {
+        crate::emit_state_changed(&app_handle, &state).await;
+        crate::update_window_size(&app_handle, &state, &config).await;
+    }
+    match reply {
+        FormReply::Sent => Ok(()),
+        FormReply::AlreadyClosed => {
+            Err("This question was already answered or closed in OpenCode.".into())
+        }
+    }
+}
+
 /// IPC command: get the loaded configuration.
 #[tauri::command]
 pub async fn get_config(config: tauri::State<'_, ConfigState>) -> Result<Config, String> {
-    let guard = config.read().await;
-    Ok(guard.clone())
+    Ok(config.borrow().clone())
 }
 
 /// IPC command: save new configuration and apply window updates.
@@ -88,22 +99,9 @@ pub async fn save_config(
     state: tauri::State<'_, AppState>,
     config: tauri::State<'_, ConfigState>,
 ) -> Result<(), String> {
-    new_config.save()?;
+    persist_config(&config, |_| new_config.clone())?;
 
-    {
-        let mut guard = config.write().await;
-        *guard = new_config.clone();
-    }
-
-    let has_pending = {
-        let guard = state.lock().await;
-        guard.pending_count() > 0
-    };
-
-    if let Some(window) = app_handle.get_webview_window("island") {
-        crate::window::resize_and_position(&window, &new_config, has_pending, false);
-    }
-
+    crate::update_window_size(&app_handle, &state, &config).await;
     let _ = app_handle.emit("config-changed", &new_config);
 
     Ok(())
@@ -128,17 +126,14 @@ pub async fn close_settings_window(app_handle: tauri::AppHandle) -> Result<(), S
     Ok(())
 }
 
-/// IPC command: close island if no pending requests.
+/// IPC command: close the preview when no notification is waiting.
 #[tauri::command]
 pub async fn close_island(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    let has_pending = {
-        let guard = state.lock().await;
-        guard.pending_count() > 0
-    };
-    if !has_pending {
+    let state = state.lock().await;
+    if !state.has_card() {
         if let Some(window) = app_handle.get_webview_window("island") {
             let _ = window.hide();
         }
@@ -158,12 +153,9 @@ pub async fn toggle_island(
         if is_visible {
             let _ = window.hide();
         } else {
-            let cfg = config.read().await;
-            let has_pending = {
-                let guard = state.lock().await;
-                guard.pending_count() > 0
-            };
-            crate::window::resize_and_position(&window, &cfg, has_pending, true);
+            let content = state.lock().await.island_content();
+            let cfg = config.borrow().clone();
+            crate::window::resize_and_position(&window, &cfg, content, true, false);
             let _ = window.show();
             let _ = window.set_always_on_top(true);
         }
@@ -177,31 +169,64 @@ pub async fn toggle_monitoring(
     config: tauri::State<'_, ConfigState>,
     app_handle: tauri::AppHandle,
 ) -> Result<bool, String> {
-    let mut guard = config.write().await;
-    guard.behavior.pause_monitoring = !guard.behavior.pause_monitoring;
-    let is_paused = guard.behavior.pause_monitoring;
-    let new_cfg = guard.clone();
-    drop(guard);
-
-    let _ = new_cfg.save();
+    let new_cfg = persist_config(&config, |current| {
+        let mut updated = current.clone();
+        updated.behavior.pause_monitoring = !updated.behavior.pause_monitoring;
+        updated
+    })?;
     let _ = app_handle.emit("config-changed", &new_cfg);
 
-    Ok(is_paused)
+    Ok(new_cfg.behavior.pause_monitoring)
+}
+
+fn persist_config(
+    config: &ConfigState,
+    update: impl FnOnce(&Config) -> Config,
+) -> Result<Config, String> {
+    let mut result = Ok(None);
+    config.send_if_modified(|current| {
+        let updated = update(current);
+        match updated.save() {
+            Ok(()) => {
+                *current = updated.clone();
+                result = Ok(Some(updated));
+                true
+            }
+            Err(error) => {
+                result = Err(error);
+                false
+            }
+        }
+    });
+    Ok(result?.expect("config update must produce a result"))
 }
 
 /// IPC command: test/trigger a response completed popup.
 #[tauri::command]
 pub async fn test_response_notification(
     app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
     config: tauri::State<'_, ConfigState>,
 ) -> Result<(), String> {
-    if let Some(win) = app_handle.get_webview_window("island") {
-        let cfg = config.read().await;
-        crate::window::resize_and_position(&win, &cfg, true, true);
-        let _ = win.unminimize();
-        let _ = win.show();
-        let _ = win.set_always_on_top(true);
-        let _ = app_handle.emit("response-completed", ());
+    crate::show_response_notice(&app_handle, &state, &config, ResponseOutcome::Ready, true).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn test_notification_sound(chime: Chime) -> Result<(), String> {
+    sound::play_checked(chime).await
+}
+
+#[tauri::command]
+pub async fn dismiss_response_notice(
+    id: u64,
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    config: tauri::State<'_, ConfigState>,
+) -> Result<(), String> {
+    if state.lock().await.dismiss_response_notice(id) {
+        crate::emit_state_changed(&app_handle, &state).await;
+        crate::update_window_size(&app_handle, &state, &config).await;
     }
     Ok(())
 }

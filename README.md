@@ -13,8 +13,10 @@ When autonomous AI agents request tool approval (shell commands, file modificati
 - **Industrial Swiss Interface:** Designed as a tactile hardware instrument. High contrast, warm brass accents (#B58B53), solid matte charcoal (#171715), and IBM Plex typography. No emojis, no glass blur, no distractions.
 - **Dynamic Top Island:** Floats discreetly below your top bar. Auto-hides when idle, and expands instantly when tool approval is required.
 - **Immediate Response Lifecycle:** One-click instant execution with no artificial delays.
-- **Acoustic Studio Chimes:** Modeled harmonic acoustic bells synthesized using the Web Audio API with zero external media files. Distinct cues for incoming requests and task completion.
-- **Response Ready Popups:** Informs you immediately when an AI agent finishes generating code or completes execution, allowing you to review results in your terminal.
+- **Automatic OpenCode approvals:** Choose Ask every time, Auto-approve once, or Auto-approve always in Settings.
+- **Notification chimes:** Distinct chimes for approval requests and completed OpenCode responses. Switchplate plays them through Linux desktop audio, even while the island is hidden.
+- **Interactive OpenCode questions:** Answer a question from the island by choosing one or more options or typing a custom answer when available.
+- **Response ready popups:** Shows when an OpenCode response is complete, failed, or interrupted. A pending approval takes priority, and the response notice appears after you clear it.
 - **Global Keyboard Shortcuts:**
   - `Ctrl + Shift + A`: Accept / Allow Once
   - `Ctrl + Shift + D`: Reject / Deny
@@ -58,7 +60,7 @@ Switchplate provides multiple simple installation methods.
 Recommended for Debian, Ubuntu, Linux Mint, Pop!_OS, and Kali Linux:
 
 ```bash
-sudo dpkg -i dist/packages/switchplate_1.0.0_amd64.deb
+sudo dpkg -i dist/packages/switchplate_1.0.4_amd64.deb
 ```
 
 This installs the binary to `/usr/bin/switchplate`, registers desktop launchers, and installs application icons.
@@ -142,6 +144,7 @@ reduced_motion = false
 [behavior]
 only_show_on_request = true
 pause_monitoring = false
+auto_approval = "manual"
 sound_enabled = true
 autostart = true
 
@@ -152,6 +155,18 @@ deny = "ctrl+shift+d"
 always = "ctrl+shift+w"
 open_settings = "ctrl+shift+s"
 ```
+
+Open **Settings → Behaviour → OpenCode permission requests** and select **Apply & Save** to change the approval mode.
+
+- **Ask every time** (`manual`, default) shows each OpenCode permission request for review.
+- **Auto-approve once** (`allow_once`) sends an individual approval for every pending and incoming request.
+- **Auto-approve always** (`always_allow`) also asks OpenCode to save the rules proposed by each request. Switching back to manual review leaves those rules in OpenCode.
+
+Auto-approval pauses with monitoring. If an automatic reply fails, the permission request is available for manual review.
+
+In **Settings → Behaviour**, enable **Audio notification** for chimes. **Test Sound** plays the approval chime, and **Test Popup** previews the response notice and completion chime. Audio playback uses `pw-play` (PipeWire), `paplay` (PulseAudio), or `aplay` (ALSA).
+
+OpenCode v2 questions use a separate chime and appear above response notices. Choose or type your answers and select **Send answers** to continue the run. **Hide** leaves the question pending, so you can reopen Switchplate or answer in OpenCode. Auto-approval applies only to permission prompts.
 
 ---
 

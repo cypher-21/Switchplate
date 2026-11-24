@@ -1,7 +1,7 @@
-import { type Component, createSignal, onMount, onCleanup, Show } from "solid-js";
+import { type Component, createEffect, createMemo, createSignal, onMount, onCleanup, Show } from "solid-js";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import type { NotchState, Decision, Config, PermissionRequest } from "./lib/types";
+import type { Chime, NotchState, Decision, Config, PermissionRequest } from "./lib/types";
 import {
   getState,
   respondPermission,
@@ -10,17 +10,22 @@ import {
   openSettingsWindow,
   closeSettingsWindow,
   closeIsland,
+  dismissResponseNotice,
+  testNotificationSound,
+  toggleIsland,
 } from "./lib/tauri-bridge";
 import IslandPill from "./components/IslandPill";
 import ApprovalCard from "./components/ApprovalCard";
 import SettingsWindow from "./components/SettingsWindow";
 import ResponseNotice from "./components/ResponseNotice";
-import { playRequestChime, playCompletionChime } from "./lib/sound";
+import QuestionCard from "./components/QuestionCard";
 import "./styles/approval-card.css";
 
 const DEFAULT_STATE: NotchState = {
   connection: { status: "disconnected" },
   pending_requests: [],
+  pending_forms: [],
+  response_notices: [],
 };
 
 const DEFAULT_CONFIG: Config = {
@@ -44,6 +49,7 @@ const DEFAULT_CONFIG: Config = {
   behavior: {
     only_show_on_request: true,
     pause_monitoring: false,
+    auto_approval: "manual",
     sound_enabled: true,
     autostart: true,
   },
@@ -67,9 +73,8 @@ const MOCK_PREVIEW_REQUEST: PermissionRequest = {
 const App: Component = () => {
   const [state, setState] = createSignal<NotchState>(DEFAULT_STATE);
   const [config, setConfig] = createSignal<Config>(DEFAULT_CONFIG);
+  const [configReady, setConfigReady] = createSignal(false);
   const [previewMode, setPreviewMode] = createSignal(false);
-  const [responseNotice, setResponseNotice] = createSignal(false);
-  let responseNoticeTimer: number | null = null;
 
   let isSettingsWindow = false;
   try {
@@ -84,7 +89,39 @@ const App: Component = () => {
   const connectionStatus = () => state().connection.status;
   const pendingRequests = () => state().pending_requests;
   const hasRealPending = () => pendingRequests().length > 0;
-  const isCardVisible = () => hasRealPending() || previewMode();
+  const currentForm = createMemo(
+    () => state().pending_forms[0],
+    undefined,
+    { equals: (previous, next) => previous?.id === next?.id && previous?.session_id === next?.session_id },
+  );
+  const hasInput = () => hasRealPending() || Boolean(currentForm());
+  const isCardVisible = () => hasRealPending() || (!currentForm() && previewMode());
+  const visibleNotice = () => hasInput() ? undefined : state().response_notices[0];
+  const visibleNoticeId = createMemo(() => visibleNotice()?.id);
+
+  const dismissNotice = (id: number) => {
+    void dismissResponseNotice(id).catch((error) => console.warn("Could not dismiss response notice:", error));
+  };
+
+  if (!isSettingsWindow) {
+    createEffect(() => {
+      const id = visibleNoticeId();
+      if (id !== undefined) {
+        const timer = window.setTimeout(() => dismissNotice(id), 5000);
+        onCleanup(() => window.clearTimeout(timer));
+      }
+    });
+  }
+
+  const playPreviewChime = (chime: Chime) => {
+    if (config().behavior.sound_enabled) {
+      void testNotificationSound(chime).catch((error) => console.warn("Could not play preview chime:", error));
+    }
+  };
+
+  const hideQuestion = () => {
+    void toggleIsland().catch((error) => console.warn("Could not hide question:", error));
+  };
 
   const currentRequest = (): PermissionRequest | undefined => {
     if (hasRealPending()) {
@@ -100,6 +137,7 @@ const App: Component = () => {
 
   const handleRespond = async (decision: Decision) => {
     if (!hasRealPending() && previewMode()) {
+      playPreviewChime(decision === "deny" || decision === "reject" ? "reject" : "approve");
       setPreviewMode(false);
       closeIsland();
       return;
@@ -108,97 +146,80 @@ const App: Component = () => {
     if (!req) return;
     try {
       await respondPermission(req.id, decision);
-      if (pendingRequests().length <= 1 && config().behavior.only_show_on_request) {
-        closeIsland();
-      }
     } catch (err) {
       console.error("Failed to respond to permission request:", err);
     }
   };
 
   const handleSaveConfig = async (updated: Config) => {
-    try {
-      await saveConfig(updated);
-      setConfig(updated);
-    } catch (err) {
-      console.error("Failed to save configuration:", err);
-    }
+    await saveConfig(updated);
+    setConfig(updated);
   };
 
-  onMount(async () => {
-    try {
-      const [initialState, initialConfig] = await Promise.all([
-        getState(),
-        getConfig(),
-      ]);
-      setState(initialState);
-      setConfig(initialConfig);
-    } catch (err) {
-      console.warn("Could not fetch initial state or config:", err);
+  onMount(() => {
+    let mounted = true;
+    let stateUpdated = false;
+    let configUpdated = false;
+    const unlisteners: (() => void)[] = [];
+    const subscriptions = [
+      listen<NotchState>("state-changed", ({ payload }) => {
+        stateUpdated = true;
+        if (payload.pending_requests.length || payload.pending_forms.length || payload.response_notices.length) {
+          setPreviewMode(false);
+        }
+        setState(payload);
+      }),
+      listen<Config>("config-changed", ({ payload }) => {
+        configUpdated = true;
+        setConfig(payload);
+      }),
+    ];
+    if (!isSettingsWindow) {
+      subscriptions.push(
+        listen("open-island", () => {
+          if (hasInput() || visibleNotice()) return;
+          setPreviewMode(true);
+          playPreviewChime("request");
+        }),
+        listen("island-closed", () => setPreviewMode(false)),
+        listen("toggle-preview", () => {
+          if (hasInput() || visibleNotice()) return;
+          const next = !previewMode();
+          setPreviewMode(next);
+          if (next) {
+            playPreviewChime("request");
+          } else if (!hasRealPending()) {
+            void closeIsland();
+          }
+        }),
+      );
     }
 
-    const unlistenState = await listen<NotchState>("state-changed", (event) => {
-      const prevCount = state().pending_requests.length;
-      const newCount = event.payload.pending_requests.length;
-      setState(event.payload);
-      if (newCount > prevCount) {
-        setPreviewMode(false);
-        if (config().behavior.sound_enabled) {
-          playRequestChime();
-        }
+    void (async () => {
+      try {
+        await Promise.all(subscriptions.map(async (subscription) => {
+          const unlisten = await subscription;
+          if (mounted) unlisteners.push(unlisten);
+          else unlisten();
+        }));
+        const [initialState, initialConfig] = await Promise.all([getState(), getConfig()]);
+        if (mounted && !stateUpdated) setState(initialState);
+        if (mounted && !configUpdated) setConfig(initialConfig);
+      } catch (error) {
+        console.warn("Could not initialize Switchplate:", error);
+      } finally {
+        if (mounted) setConfigReady(true);
       }
-    });
-
-    const unlistenConfig = await listen<Config>("config-changed", (event) => {
-      setConfig(event.payload);
-    });
-
-    const unlistenOpen = await listen("open-island", () => {
-      setPreviewMode(true);
-      if (config().behavior.sound_enabled) {
-        playRequestChime();
-      }
-    });
-
-    const unlistenClose = await listen("island-closed", () => {
-      setPreviewMode(false);
-    });
-
-    const unlistenPreview = await listen("toggle-preview", () => {
-      setPreviewMode((prev) => {
-        const next = !prev;
-        if (!next && !hasRealPending()) {
-          closeIsland();
-        } else if (next && config().behavior.sound_enabled) {
-          playRequestChime();
-        }
-        return next;
-      });
-    });
-
-    const unlistenResponse = await listen("response-completed", () => {
-      setResponseNotice(true);
-      if (config().behavior.sound_enabled) {
-        playCompletionChime();
-      }
-      if (responseNoticeTimer) window.clearTimeout(responseNoticeTimer);
-      responseNoticeTimer = window.setTimeout(() => {
-        setResponseNotice(false);
-        if (!hasRealPending()) {
-          closeIsland();
-        }
-      }, 5000);
-    });
+    })();
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         if (isSettingsWindow) {
           closeSettingsWindow();
-        } else if (responseNotice()) {
-          setResponseNotice(false);
-          if (!hasRealPending()) {
-            closeIsland();
-          }
+        } else if (visibleNoticeId() !== undefined) {
+          dismissNotice(visibleNoticeId()!);
+        } else if (currentForm() && !hasRealPending()) {
+          hideQuestion();
         } else if (previewMode()) {
           setPreviewMode(false);
           if (!hasRealPending()) {
@@ -210,13 +231,8 @@ const App: Component = () => {
     window.addEventListener("keydown", handleKeyDown);
 
     onCleanup(() => {
-      if (responseNoticeTimer) window.clearTimeout(responseNoticeTimer);
-      unlistenState();
-      unlistenConfig();
-      unlistenOpen();
-      unlistenClose();
-      unlistenPreview();
-      unlistenResponse();
+      mounted = false;
+      unlisteners.forEach((unlisten) => unlisten());
       window.removeEventListener("keydown", handleKeyDown);
     });
   });
@@ -224,25 +240,34 @@ const App: Component = () => {
   if (isSettingsWindow) {
     return (
       <div class="settings-app-container">
-        <SettingsWindow
-          config={config()}
-          state={state()}
-          onSaveConfig={handleSaveConfig}
-          onClose={closeSettingsWindow}
-        />
+        <Show when={configReady()}>
+          <SettingsWindow
+            config={config()}
+            state={state()}
+            onSaveConfig={handleSaveConfig}
+            onClose={closeSettingsWindow}
+          />
+        </Show>
       </div>
     );
   }
 
   return (
     <div class="island-app-container">
+      <Show when={currentForm()} keyed>
+        {(form) => (
+          <div class="question-shell" hidden={hasRealPending()}>
+            <QuestionCard form={form} queueCount={state().pending_forms.length - 1} onHide={hideQuestion} />
+          </div>
+        )}
+      </Show>
       <Show
-        when={responseNotice() && !hasRealPending()}
+        when={visibleNotice()}
         fallback={
           <Show
             when={isCardVisible()}
             fallback={
-              <Show when={!config().behavior.only_show_on_request}>
+              <Show when={!currentForm() && !config().behavior.only_show_on_request}>
                 <IslandPill
                   status={connectionStatus()}
                   onClick={() => setPreviewMode(!previewMode())}
@@ -254,8 +279,6 @@ const App: Component = () => {
             <ApprovalCard
               request={currentRequest()!}
               queueCount={queueCount()}
-              config={config()}
-              isPreview={previewMode() && !hasRealPending()}
               onRespond={handleRespond}
               onOpenSettings={openSettingsWindow}
               onDismiss={() => {
@@ -268,14 +291,9 @@ const App: Component = () => {
           </Show>
         }
       >
-        <ResponseNotice
-          onDismiss={() => {
-            setResponseNotice(false);
-            if (!hasRealPending()) {
-              closeIsland();
-            }
-          }}
-        />
+        {(notice) => (
+          <ResponseNotice outcome={notice().outcome} onDismiss={() => dismissNotice(notice().id)} />
+        )}
       </Show>
     </div>
   );

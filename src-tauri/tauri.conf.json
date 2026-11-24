@@ -1,10 +1,10 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicegui/Tauri/dev/crates/tauri-schema-generator/schemas/config.schema.json",
   "productName": "Switchplate",
-  "version": "1.0.0",
+  "version": "1.0.4",
   "identifier": "dev.switchplate.desktop",
   "build": {
-    "frontendDist": "../dist",
+    "frontendDist": "../dist/frontend",
     "beforeBuildCommand": "npm run build"
   },
   "app": {

@@ -1,8 +1,16 @@
 import { type Component } from "solid-js";
+import type { ResponseOutcome } from "../lib/types";
 
 interface ResponseNoticeProps {
+  outcome: ResponseOutcome;
   onDismiss: () => void;
 }
+
+const copy = {
+  ready: { title: "Response ready", message: "OpenCode finished this response." },
+  failed: { title: "Response failed", message: "OpenCode encountered an error." },
+  interrupted: { title: "Response stopped", message: "The OpenCode run was interrupted." },
+};
 
 const ResponseNotice: Component<ResponseNoticeProps> = (props) => {
   return (
@@ -10,9 +18,8 @@ const ResponseNotice: Component<ResponseNoticeProps> = (props) => {
       <div class="response-notice-card__header">
         <div class="response-notice-card__title-group">
           <div class="response-notice-card__brass-indicator" />
-          <div class="response-notice-card__text-block">
-            <span class="response-notice-card__title">RESPONSE GENERATED</span>
-            <span class="response-notice-card__subtitle">TASK COMPLETED</span>
+          <div class="response-notice-card__text-block" role="status">
+            <h2 class="response-notice-card__title">{copy[props.outcome].title}</h2>
           </div>
         </div>
 
@@ -32,12 +39,14 @@ const ResponseNotice: Component<ResponseNoticeProps> = (props) => {
       <div class="response-notice-card__body">
         <div class="response-notice-card__icon-box">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#B58B53" stroke-width="2.2">
-            <polyline points="20 6 9 17 4 12" />
+            {props.outcome === "ready"
+              ? <polyline points="20 6 9 17 4 12" />
+              : <path d="M12 5v9m0 4h.01" />}
           </svg>
         </div>
         <div class="response-notice-card__desc">
-          <span class="response-notice-card__main-text">Output generation complete.</span>
-          <span class="response-notice-card__sub-text">Check your terminal session for results.</span>
+          <span class="response-notice-card__main-text">{copy[props.outcome].message}</span>
+          <span class="response-notice-card__sub-text">Open your terminal for details.</span>
         </div>
       </div>
 

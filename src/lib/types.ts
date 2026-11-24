@@ -14,9 +14,61 @@ export interface PermissionRequest {
 export interface NotchState {
   connection: ConnectionStatus;
   pending_requests: PermissionRequest[];
+  pending_forms: OpenCodeForm[];
+  response_notices: ResponseNotice[];
 }
 
+export interface FormId {
+  id: string;
+  session_id: string;
+}
+
+export interface OpenCodeForm extends FormId {
+  title: string;
+  fields: FormField[];
+}
+
+export type FormScalar = string | boolean | number;
+export type FormValue = FormScalar | string[];
+export type FormAnswer = Record<string, FormValue>;
+
+export interface FormOption {
+  value: string;
+  label: string;
+  description?: string;
+}
+
+export interface FormField {
+  key: string;
+  type: string;
+  title?: string;
+  description?: string;
+  required?: boolean;
+  hidden?: boolean;
+  when?: { key: string; op: "eq" | "neq"; value: FormScalar }[];
+  default?: FormValue;
+  options?: FormOption[];
+  custom?: boolean;
+  placeholder?: string;
+  minItems?: number;
+  maxItems?: number;
+  minLength?: number;
+  maxLength?: number;
+  minimum?: number | string;
+  maximum?: number | string;
+}
+
+export type ResponseOutcome = "ready" | "failed" | "interrupted";
+
+export interface ResponseNotice {
+  id: number;
+  outcome: ResponseOutcome;
+}
+
+export type Chime = "request" | "completion" | "approve" | "reject";
+
 export type Decision = "allow" | "deny" | "always" | "approve" | "reject" | "always_approve";
+export type AutoApproval = "manual" | "allow_once" | "always_allow";
 
 export interface Config {
   opencode: {
@@ -39,6 +91,7 @@ export interface Config {
   behavior: {
     only_show_on_request: boolean;
     pause_monitoring: boolean;
+    auto_approval: AutoApproval;
     sound_enabled: boolean;
     autostart: boolean;
   };

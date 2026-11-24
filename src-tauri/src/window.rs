@@ -1,27 +1,38 @@
 use crate::config::Config;
+use crate::state::IslandContent;
 use tauri::WebviewWindow;
 use tracing::{debug, warn};
 
-/// Position and resize the Switchplate window based on pending permission requests.
+/// Position and resize the Switchplate window based on the active card.
 ///
-/// When `has_pending` is true:
-/// - Resizes to `card_width x card_height`
-/// - Positions at the configured anchor below the GNOME panel
-/// - Shows the window and sets always_on_top
-///
-/// When `has_pending` is false:
-/// - If `only_show_on_request` is true: completely hides the window!
-/// - Otherwise: resizes to compact pill size and positions below GNOME panel
-pub fn resize_and_position(window: &WebviewWindow, config: &Config, has_pending: bool, force_show: bool) {
-    if !has_pending && !force_show && config.behavior.only_show_on_request {
+/// Questions get enough room for scrollable answers and a fixed submit button.
+pub fn resize_and_position(
+    window: &WebviewWindow,
+    config: &Config,
+    content: IslandContent,
+    force_show: bool,
+    focus: bool,
+) {
+    let has_card = content != IslandContent::Idle;
+    if !has_card && !force_show && config.behavior.only_show_on_request {
         debug!("No pending requests and only_show_on_request is enabled: hiding window");
         let _ = window.hide();
         return;
     }
 
     let scale_factor = window.scale_factor().unwrap_or(1.0);
+    let (monitor_width, monitor_height, monitor_x, monitor_y) = get_monitor_dimensions(window);
 
-    let (logical_width, logical_height) = if has_pending || force_show {
+    let (logical_width, logical_height) = if content == IslandContent::Form {
+        (
+            f64::from(config.appearance.card_width)
+                .max(400.0)
+                .min((monitor_width - 48.0).max(300.0)),
+            f64::from(config.appearance.card_height)
+                .max(520.0)
+                .min((monitor_height - 100.0).max(240.0)),
+        )
+    } else if has_card || force_show {
         (
             config.appearance.card_width as f64,
             config.appearance.card_height as f64,
@@ -52,9 +63,6 @@ pub fn resize_and_position(window: &WebviewWindow, config: &Config, has_pending:
         }
     }
 
-    // Calculate position
-    let (monitor_width, monitor_height, monitor_x, monitor_y) = get_monitor_dimensions(window);
-
     let (x, y) = calculate_coordinates(
         &config.appearance.position,
         monitor_width,
@@ -67,18 +75,22 @@ pub fn resize_and_position(window: &WebviewWindow, config: &Config, has_pending:
         config.appearance.offset_y as f64,
     );
 
-    debug!("Positioning Switchplate at logical ({}, {}) for anchor '{}'", x, y, config.appearance.position);
+    debug!(
+        "Positioning Switchplate at logical ({}, {}) for anchor '{}'",
+        x, y, config.appearance.position
+    );
 
-    if let Err(e) = window.set_position(tauri::Position::Logical(
-        tauri::LogicalPosition::new(x, y),
-    )) {
+    if let Err(e) = window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(x, y)))
+    {
         debug!("Position adjustment error: {}", e);
     }
 
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_always_on_top(true);
-    let _ = window.set_focus();
+    if focus {
+        let _ = window.set_focus();
+    }
 }
 
 /// Calculate screen coordinates from position anchor and offsets.
@@ -135,7 +147,12 @@ fn get_monitor_dimensions(window: &WebviewWindow) -> (f64, f64, f64, f64) {
         Some(m) => {
             let logical_size = m.size().to_logical::<f64>(scale_factor);
             let logical_pos = m.position().to_logical::<f64>(scale_factor);
-            (logical_size.width, logical_size.height, logical_pos.x, logical_pos.y)
+            (
+                logical_size.width,
+                logical_size.height,
+                logical_pos.x,
+                logical_pos.y,
+            )
         }
         None => (1920.0, 1080.0, 0.0, 0.0),
     }

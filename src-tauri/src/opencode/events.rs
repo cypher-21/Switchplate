@@ -1,4 +1,7 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
+use super::forms::{FormCreated, FormSettled};
 
 /// Top-level event envelope received from the OpenCode SSE stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -8,22 +11,133 @@ pub enum OpenCodeEvent {
     PermissionAsked(PermissionAskedPayload),
     #[serde(rename = "permission.replied")]
     PermissionReplied(PermissionRepliedPayload),
+    #[serde(rename = "form.created")]
+    FormCreated(FormCreated),
+    #[serde(rename = "form.replied", alias = "form.cancelled")]
+    FormSettled(FormSettled),
     #[serde(rename = "session.created")]
     SessionCreated(SessionEventPayload),
     #[serde(rename = "session.ended")]
     SessionEnded(SessionEventPayload),
     #[serde(rename = "session.deleted")]
     SessionDeleted(SessionEventPayload),
+    #[serde(rename = "session.execution.started")]
+    ExecutionStarted(SessionProgress),
+    #[serde(
+        rename = "session.execution.succeeded",
+        alias = "turn.completed",
+        alias = "response.completed"
+    )]
+    ExecutionSucceeded(SessionProgress),
+    #[serde(rename = "session.execution.failed")]
+    ExecutionFailed(SessionProgress),
+    #[serde(rename = "session.execution.interrupted")]
+    ExecutionInterrupted(SessionProgress),
+    #[serde(rename = "session.status")]
+    SessionStatus(SessionProgress),
     #[serde(rename = "session.idle")]
-    SessionIdle(serde_json::Value),
-    #[serde(rename = "message.completed")]
-    MessageCompleted(serde_json::Value),
-    #[serde(rename = "turn.completed")]
-    TurnCompleted(serde_json::Value),
-    #[serde(rename = "response.completed")]
-    ResponseCompleted(serde_json::Value),
+    SessionIdle(SessionProgress),
     #[serde(other)]
     Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionProgress {
+    #[serde(default)]
+    data: Option<ProgressData>,
+    #[serde(default)]
+    properties: Option<ProgressData>,
+    #[serde(flatten)]
+    flat: ProgressData,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProgressData {
+    #[serde(default, rename = "sessionID", alias = "session_id")]
+    session_id: String,
+    #[serde(default)]
+    status: serde_json::Value,
+}
+
+impl SessionProgress {
+    fn details(&self) -> &ProgressData {
+        self.data
+            .as_ref()
+            .or(self.properties.as_ref())
+            .unwrap_or(&self.flat)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseOutcome {
+    Ready,
+    Failed,
+    Interrupted,
+}
+
+#[derive(Default)]
+pub struct ResponseTracker {
+    // The last transition for each session. An idle event after an execution
+    // result must not announce the same response a second time.
+    sessions: HashMap<String, SessionPhase>,
+}
+
+enum SessionPhase {
+    Working,
+    Finished,
+}
+
+impl ResponseTracker {
+    pub fn observe(&mut self, event: &OpenCodeEvent) -> Option<ResponseOutcome> {
+        let (progress, outcome, requires_activity) = match event {
+            OpenCodeEvent::ExecutionStarted(progress) => (progress, None, false),
+            OpenCodeEvent::ExecutionSucceeded(progress) => {
+                (progress, Some(ResponseOutcome::Ready), false)
+            }
+            OpenCodeEvent::ExecutionFailed(progress) => {
+                (progress, Some(ResponseOutcome::Failed), false)
+            }
+            OpenCodeEvent::ExecutionInterrupted(progress) => {
+                (progress, Some(ResponseOutcome::Interrupted), false)
+            }
+            OpenCodeEvent::SessionIdle(progress) => (progress, Some(ResponseOutcome::Ready), true),
+            OpenCodeEvent::SessionStatus(progress) => {
+                let status = &progress.details().status;
+                match status
+                    .as_str()
+                    .or_else(|| status.get("type").and_then(|value| value.as_str()))
+                {
+                    Some("busy" | "retry") => (progress, None, false),
+                    Some("idle") => (progress, Some(ResponseOutcome::Ready), true),
+                    _ => return None,
+                }
+            }
+            OpenCodeEvent::SessionEnded(session) | OpenCodeEvent::SessionDeleted(session) => {
+                self.sessions.remove(&session.session_id());
+                return None;
+            }
+            _ => return None,
+        };
+
+        let session_id = &progress.details().session_id;
+        if session_id.is_empty() {
+            return None;
+        }
+        if outcome.is_none() {
+            self.sessions
+                .insert(session_id.clone(), SessionPhase::Working);
+            return None;
+        }
+        match self.sessions.get(session_id) {
+            Some(SessionPhase::Finished) => return None,
+            None if requires_activity => return None,
+            _ => {}
+        }
+        self.sessions
+            .insert(session_id.clone(), SessionPhase::Finished);
+        outcome
+    }
 }
 
 /// Flexible payload for permission.asked events.
@@ -53,7 +167,11 @@ impl PermissionAskedPayload {
         let nested = self.data.as_ref().or(self.properties.as_ref());
 
         if let Some(val) = nested {
-            let req_id = val.get("id").and_then(|v| v.as_str()).unwrap_or(&self.id).to_string();
+            let req_id = val
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&self.id)
+                .to_string();
             let session_id = val
                 .get("sessionID")
                 .or_else(|| val.get("session_id"))
@@ -143,7 +261,9 @@ impl PermissionRepliedPayload {
                 .unwrap_or("unknown")
                 .to_string()
         } else {
-            self.decision.clone().unwrap_or_else(|| "unknown".to_string())
+            self.decision
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string())
         }
     }
 }
@@ -231,5 +351,90 @@ impl Decision {
             "always" | "always_approve" | "always_allow" => Some(Decision::Always),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn observe(tracker: &mut ResponseTracker, event: serde_json::Value) -> Option<ResponseOutcome> {
+        tracker.observe(&serde_json::from_value(event).unwrap())
+    }
+
+    #[test]
+    fn execution_success_announces_once_after_the_whole_response() {
+        let mut tracker = ResponseTracker::default();
+        for kind in [
+            "session.execution.started",
+            "session.step.ended",
+            "message.completed",
+        ] {
+            assert_eq!(
+                observe(
+                    &mut tracker,
+                    serde_json::json!({
+                        "type": kind, "data": { "sessionID": "ses_1" }
+                    })
+                ),
+                None
+            );
+        }
+        let success = serde_json::json!({
+            "type": "session.execution.succeeded", "data": { "sessionID": "ses_1" },
+            "durable": { "aggregateID": "ses_1", "seq": 11, "version": 1 }
+        });
+        assert_eq!(
+            observe(&mut tracker, success.clone()),
+            Some(ResponseOutcome::Ready)
+        );
+        assert_eq!(observe(&mut tracker, success), None);
+        assert_eq!(
+            observe(
+                &mut tracker,
+                serde_json::json!({
+                    "type": "session.idle", "data": { "sessionID": "ses_1" }
+                })
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn legacy_idle_requires_work_and_terminal_errors_keep_their_outcome() {
+        let mut tracker = ResponseTracker::default();
+        let idle = serde_json::json!({
+            "type": "session.status", "properties": { "sessionID": "ses_1", "status": { "type": "idle" } }
+        });
+        assert_eq!(observe(&mut tracker, idle.clone()), None);
+        let busy = serde_json::json!({
+            "type": "session.status", "properties": { "sessionID": "ses_1", "status": { "type": "busy" } }
+        });
+        assert_eq!(observe(&mut tracker, busy.clone()), None);
+        assert_eq!(
+            observe(&mut tracker, idle.clone()),
+            Some(ResponseOutcome::Ready)
+        );
+        assert_eq!(observe(&mut tracker, idle.clone()), None);
+        assert_eq!(observe(&mut tracker, busy), None);
+        assert_eq!(
+            observe(
+                &mut tracker,
+                serde_json::json!({
+                    "type": "session.execution.failed", "data": { "sessionID": "ses_1" }
+                })
+            ),
+            Some(ResponseOutcome::Failed)
+        );
+        assert_eq!(observe(&mut tracker, idle), None);
+        assert_eq!(
+            observe(
+                &mut tracker,
+                serde_json::json!({
+                    "type": "session.execution.interrupted", "data": { "sessionID": "ses_2" }
+                })
+            ),
+            Some(ResponseOutcome::Interrupted)
+        );
     }
 }

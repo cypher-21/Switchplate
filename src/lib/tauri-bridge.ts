@@ -1,8 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { NotchState, Decision, Config } from "./types";
+import type { NotchState, Decision, Config, Chime, FormAnswer, FormId } from "./types";
 
 export async function getState(): Promise<NotchState> {
   return await invoke<NotchState>("get_state");
+}
+
+export async function replyToForm(form: FormId, answer: FormAnswer): Promise<void> {
+  await invoke("reply_to_form", { form, answer });
 }
 
 export async function respondPermission(
@@ -47,4 +51,12 @@ export async function toggleMonitoring(): Promise<boolean> {
 
 export async function testResponseNotification(): Promise<void> {
   await invoke("test_response_notification");
+}
+
+export async function testNotificationSound(chime: Chime): Promise<void> {
+  await invoke("test_notification_sound", { chime });
+}
+
+export async function dismissResponseNotice(id: number): Promise<void> {
+  await invoke("dismiss_response_notice", { id });
 }

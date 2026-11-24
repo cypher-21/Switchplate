@@ -1,17 +1,23 @@
-import { type Component, createSignal, onMount, onCleanup } from "solid-js";
-import { emit } from "@tauri-apps/api/event";
-import type { Config, NotchState } from "../lib/types";
+import { type Component, createEffect, createMemo, createSignal, For, onMount, onCleanup } from "solid-js";
+import { version } from "../../package.json";
+import type { AutoApproval, Config, NotchState } from "../lib/types";
 import SwitchplateIcon from "./SwitchplateIcon";
-import { playRequestChime, playCompletionChime } from "../lib/sound";
+import { testNotificationSound, testResponseNotification } from "../lib/tauri-bridge";
 
 interface SettingsWindowProps {
   config: Config;
   state: NotchState;
-  onSaveConfig: (updated: Config) => void;
+  onSaveConfig: (updated: Config) => Promise<void>;
   onClose: () => void;
 }
 
 type TabKey = "opencode" | "appearance" | "behaviour" | "shortcuts" | "about";
+
+const approvalModes: { value: AutoApproval; label: string }[] = [
+  { value: "manual", label: "Ask every time" },
+  { value: "allow_once", label: "Auto-approve once" },
+  { value: "always_allow", label: "Auto-approve always" },
+];
 
 const SettingsWindow: Component<SettingsWindowProps> = (props) => {
   const [activeTab, setActiveTab] = createSignal<TabKey>("opencode");
@@ -26,23 +32,43 @@ const SettingsWindow: Component<SettingsWindowProps> = (props) => {
   const [reducedMotion, setReducedMotion] = createSignal(props.config.appearance.reduced_motion ?? false);
   const [onlyOnRequest, setOnlyOnRequest] = createSignal(props.config.behavior.only_show_on_request ?? true);
   const [pauseMonitoring, setPauseMonitoring] = createSignal(props.config.behavior.pause_monitoring ?? false);
+  const savedApprovalMode = createMemo(() => props.config.behavior.auto_approval);
+  const [autoApproval, setAutoApproval] = createSignal(savedApprovalMode());
   const [soundEnabled, setSoundEnabled] = createSignal(props.config.behavior.sound_enabled ?? true);
-  const [savedNotice, setSavedNotice] = createSignal(false);
+  const [saveStatus, setSaveStatus] = createSignal("");
+  const [isSaving, setIsSaving] = createSignal(false);
+  const [audioTestError, setAudioTestError] = createSignal("");
+
+  createEffect(() => setAutoApproval(savedApprovalMode()));
+
+  const testNotification = async (test: () => Promise<void>) => {
+    setAudioTestError("");
+    try {
+      await test();
+    } catch (error) {
+      setAudioTestError(String(error));
+    }
+  };
 
   const isConnected = () => props.state.connection.status === "connected";
+  const handleClose = () => {
+    setAutoApproval(savedApprovalMode());
+    setSaveStatus("");
+    props.onClose();
+  };
 
   // Handle Escape key to close settings
   onMount(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        props.onClose();
+        handleClose();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     onCleanup(() => window.removeEventListener("keydown", handleKeyDown));
   });
 
-  const handleApply = () => {
+  const handleApply = async () => {
     const updated: Config = {
       ...props.config,
       opencode: {
@@ -62,12 +88,20 @@ const SettingsWindow: Component<SettingsWindowProps> = (props) => {
         ...props.config.behavior,
         only_show_on_request: onlyOnRequest(),
         pause_monitoring: pauseMonitoring(),
+        auto_approval: autoApproval(),
         sound_enabled: soundEnabled(),
       },
     };
-    props.onSaveConfig(updated);
-    setSavedNotice(true);
-    window.setTimeout(() => setSavedNotice(false), 2500);
+    setIsSaving(true);
+    setSaveStatus("");
+    try {
+      await props.onSaveConfig(updated);
+      setSaveStatus("Changes saved.");
+    } catch (error) {
+      setSaveStatus(`Save failed. ${error}`);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
@@ -329,6 +363,40 @@ const SettingsWindow: Component<SettingsWindowProps> = (props) => {
                 <p class="settings-pane-subtitle">Manage monitoring and presence.</p>
               </div>
 
+              <div class="settings-form-row">
+                <span class="settings-form-label" id="auto-approval-label">OpenCode permission requests</span>
+                <div
+                  class="segmented-control"
+                  role="group"
+                  aria-labelledby="auto-approval-label"
+                  aria-describedby="auto-approval-description"
+                >
+                  <For each={approvalModes}>
+                    {(mode) => (
+                      <button
+                        type="button"
+                        class="segmented-btn"
+                        classList={{ active: autoApproval() === mode.value }}
+                        aria-pressed={autoApproval() === mode.value}
+                        onClick={() => {
+                          setAutoApproval(mode.value);
+                          setSaveStatus("");
+                        }}
+                      >
+                        {mode.label}
+                      </button>
+                    )}
+                  </For>
+                </div>
+                <span class="settings-toggle-subtext" id="auto-approval-description">
+                  {autoApproval() === "always_allow"
+                    ? "Approve pending and new requests and ask OpenCode to remember their proposed permission rules."
+                    : autoApproval() === "allow_once"
+                      ? "Approve pending and new requests individually without saving permission rules in OpenCode."
+                      : "Show each permission request for review."}
+                </span>
+              </div>
+
               <div class="settings-toggle-row">
                 <div class="settings-toggle-info">
                   <span class="settings-toggle-title">Auto-hide when idle</span>
@@ -346,12 +414,13 @@ const SettingsWindow: Component<SettingsWindowProps> = (props) => {
 
               <div class="settings-toggle-row">
                 <div class="settings-toggle-info">
-                  <span class="settings-toggle-title">Pause Monitoring</span>
+                  <span class="settings-toggle-title" id="pause-monitoring-label">Pause Monitoring</span>
                   <span class="settings-toggle-subtext">Temporarily stop intercepting OpenCode events.</span>
                 </div>
                 <label class="switch">
                   <input
                     type="checkbox"
+                    aria-labelledby="pause-monitoring-label"
                     checked={pauseMonitoring()}
                     onChange={(e) => setPauseMonitoring(e.currentTarget.checked)}
                   />
@@ -361,14 +430,14 @@ const SettingsWindow: Component<SettingsWindowProps> = (props) => {
 
               <div class="settings-toggle-row">
                 <div class="settings-toggle-info">
-                  <span class="settings-toggle-title">Audio notification</span>
+                  <span class="settings-toggle-title" id="notification-sound-label">Audio notification</span>
                   <span class="settings-toggle-subtext">Play hardware chimes on incoming approval requests and responses.</span>
                 </div>
                 <div style={{ display: "flex", "align-items": "center", gap: "10px" }}>
                   <button
                     type="button"
                     class="test-chime-btn"
-                    onClick={() => playRequestChime()}
+                    onClick={() => testNotification(() => testNotificationSound("request"))}
                     title="Test chime sound"
                   >
                     Test Sound
@@ -376,10 +445,7 @@ const SettingsWindow: Component<SettingsWindowProps> = (props) => {
                   <button
                     type="button"
                     class="test-chime-btn"
-                    onClick={() => {
-                      playCompletionChime();
-                      emit("response-completed");
-                    }}
+                    onClick={() => testNotification(testResponseNotification)}
                     title="Test response notification popup"
                   >
                     Test Popup
@@ -387,6 +453,7 @@ const SettingsWindow: Component<SettingsWindowProps> = (props) => {
                   <label class="switch">
                     <input
                       type="checkbox"
+                      aria-labelledby="notification-sound-label"
                       checked={soundEnabled()}
                       onChange={(e) => setSoundEnabled(e.currentTarget.checked)}
                     />
@@ -394,6 +461,7 @@ const SettingsWindow: Component<SettingsWindowProps> = (props) => {
                   </label>
                 </div>
               </div>
+              {audioTestError() && <p class="settings-toggle-subtext" role="alert">{audioTestError()}</p>}
             </div>
           )}
 
@@ -459,7 +527,7 @@ const SettingsWindow: Component<SettingsWindowProps> = (props) => {
                 <h1 class="about-hero__title">SWITCHPLATE</h1>
                 <p class="about-hero__subtitle">OpenCode Desktop Companion</p>
                 <p class="about-hero__tagline">Your control surface for OpenCode.</p>
-                <span class="about-version">Version 1.0.0 — Precision Instrument Interface</span>
+                <span class="about-version">Version {version} — Precision Instrument Interface</span>
               </div>
 
               <div class="diagnostics-card">
@@ -488,13 +556,13 @@ const SettingsWindow: Component<SettingsWindowProps> = (props) => {
 
           {/* Footer */}
           <div class="settings-content__footer">
-            <button class="settings-cancel-btn" onClick={props.onClose} type="button">
+            <button class="settings-cancel-btn" onClick={handleClose} type="button">
               Cancel
             </button>
-            <span class="settings-status-note">
-              {savedNotice() ? "Changes applied and saved." : "Saved to ~/.config/switchplate/config.toml"}
+            <span class="settings-status-note" role="status">
+              {saveStatus() || "Saved to ~/.config/switchplate/config.toml"}
             </span>
-            <button class="settings-apply-btn" onClick={handleApply} type="button">
+            <button class="settings-apply-btn" onClick={handleApply} type="button" disabled={isSaving()}>
               Apply & Save
             </button>
           </div>

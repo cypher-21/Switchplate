@@ -1,16 +1,29 @@
 use base64::Engine;
 use futures_util::{Stream, StreamExt};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
-use crate::config::Config;
+use crate::config::{Config, OpenCodeConfig};
 use crate::opencode::discovery::discover_server;
 use crate::opencode::events::{Decision, OpenCodeEvent, PermissionRequest, SessionInfo};
+use crate::opencode::forms::{FormAnswer, FormId, OpenCodeForm};
+
+#[derive(Default)]
+pub struct PendingInputs {
+    pub permissions: Vec<PermissionRequest>,
+    pub forms: Vec<OpenCodeForm>,
+}
+
+pub enum FormReply {
+    Sent,
+    AlreadyClosed,
+}
 
 /// HTTP client for communicating with the OpenCode server.
 #[derive(Debug, Clone)]
 pub struct OpenCodeClient {
     base_url: String,
+    connection_config: OpenCodeConfig,
     username: String,
     password: String,
     http: reqwest::Client,
@@ -32,12 +45,15 @@ impl OpenCodeClient {
         let username = String::from("opencode");
 
         let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(
+                config.opencode.request_timeout.max(1).into(),
+            ))
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
         let client = Self {
             base_url: discovered.url,
+            connection_config: config.opencode.clone(),
             username,
             password,
             http,
@@ -121,24 +137,69 @@ impl OpenCodeClient {
         }
     }
 
-    /// Fetch any active pending permission requests (GET /api/permission/request).
-    pub async fn fetch_pending_permissions(&self) -> Result<Vec<PermissionRequest>, String> {
-        let url = format!("{}/api/permission/request", self.base_url);
-
-        let response = match self.http.get(&url).headers(self.default_headers()).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                debug!("Failed to query pending permission requests: {}", e);
-                return Ok(Vec::new());
-            }
+    /// Read pending inputs across the same loaded locations as the event stream.
+    pub async fn fetch_pending_inputs(&self) -> PendingInputs {
+        let locations = self.loaded_locations().await;
+        let targets = if locations.is_empty() {
+            vec![None]
+        } else {
+            locations.into_iter().map(Some).collect()
         };
+        let batches = futures_util::stream::iter(targets)
+            .map(|directory| async move {
+                let directory = directory.as_deref();
+                tokio::join!(
+                    self.fetch_permissions_in(directory),
+                    self.fetch_forms_in(directory),
+                )
+            })
+            .buffer_unordered(8);
+        futures_util::pin_mut!(batches);
 
-        if !response.status().is_success() {
-            debug!("GET /api/permission/request returned HTTP {}", response.status());
-            return Ok(Vec::new());
+        let mut pending = PendingInputs::default();
+        while let Some((permissions, forms)) = batches.next().await {
+            match permissions {
+                Ok(batch) => pending.permissions.extend(batch),
+                Err(error) => warn!("Could not load pending OpenCode permissions: {error}"),
+            }
+            match forms {
+                Ok(batch) => pending.forms.extend(batch),
+                Err(error) => debug!("Could not load pending OpenCode forms: {error}"),
+            }
+        }
+        pending
+    }
+
+    async fn loaded_locations(&self) -> Vec<String> {
+        #[derive(serde::Deserialize)]
+        struct Location {
+            directory: String,
         }
 
-        let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+        let url = format!("{}/api/debug/location", self.base_url);
+        let response = self
+            .http
+            .get(url)
+            .headers(self.default_headers())
+            .send()
+            .await;
+        let Ok(response) = response.and_then(reqwest::Response::error_for_status) else {
+            return Vec::new();
+        };
+        response
+            .json::<Vec<Location>>()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|location| location.directory)
+            .collect()
+    }
+
+    async fn fetch_permissions_in(
+        &self,
+        directory: Option<&str>,
+    ) -> Result<Vec<PermissionRequest>, String> {
+        let body = self.get_location_data("/api/permission/request", directory).await?;
 
         let items = body
             .get("data")
@@ -190,6 +251,57 @@ impl OpenCodeClient {
         }
 
         Ok(requests)
+    }
+
+    async fn fetch_forms_in(&self, directory: Option<&str>) -> Result<Vec<OpenCodeForm>, String> {
+        #[derive(serde::Deserialize)]
+        struct PendingForms {
+            data: Vec<OpenCodeForm>,
+        }
+
+        let body = self.get_location_data("/api/form", directory).await?;
+        serde_json::from_value::<PendingForms>(body)
+            .map(|pending| pending.data)
+            .map_err(|error| error.to_string())
+    }
+
+    async fn get_location_data(
+        &self,
+        path: &str,
+        directory: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        let url = format!("{}{path}", self.base_url);
+        let mut request = self.http.get(&url).headers(self.default_headers());
+        if let Some(directory) = directory {
+            request = request.query(&[("location[directory]", directory)]);
+        }
+        request.send().await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|error| format!("GET {url} failed: {error}"))?
+            .json().await.map_err(|error| error.to_string())
+    }
+
+    pub async fn reply_to_form(&self, form: &FormId, answer: FormAnswer) -> Result<FormReply, String> {
+        let url = self.api_url(&["api", "session", &form.session_id, "form", &form.id, "reply"])?;
+        let response = self.http.post(url)
+            .headers(self.default_headers())
+            .json(&serde_json::json!({ "answer": answer }))
+            .send()
+            .await
+            .map_err(|error| format!("Could not send the answer to OpenCode: {error}"))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(FormReply::Sent);
+        }
+        let body = response.json::<serde_json::Value>().await.unwrap_or_default();
+        match body.get("_tag").and_then(|value| value.as_str()) {
+            Some("FormNotFoundError" | "FormAlreadySettledError" | "SessionNotFoundError") => {
+                Ok(FormReply::AlreadyClosed)
+            }
+            _ => Err(body.get("message").and_then(|value| value.as_str())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("OpenCode could not accept the answer ({status})."))),
+        }
     }
 
     /// Subscribe to the SSE event stream from the OpenCode server.
@@ -317,43 +429,51 @@ impl OpenCodeClient {
     /// with decision: "allow" | "deny" | "always"
     pub async fn respond_permission(
         &self,
-        request_id: &str,
-        session_id: Option<&str>,
+        request: &PermissionRequest,
         decision: Decision,
     ) -> Result<(), String> {
+        let request_id = &request.id;
         let v2_reply = decision.as_opencode_v2_reply();
 
         // 1. Try OpenCode v2 session-scoped route if session_id is available
-        if let Some(sid) = session_id.filter(|s| !s.is_empty()) {
-            let v2_url = format!(
-                "{}/api/session/{}/permission/{}/reply",
-                self.base_url, sid, request_id
-            );
+        if !request.session_id.is_empty() {
+            let sid = &request.session_id;
+            let v2_url =
+                self.api_url(&["api", "session", sid, "permission", request_id, "reply"])?;
             debug!("Trying OpenCode v2 permission reply at {}", v2_url);
 
             let body = serde_json::json!({
                 "decision": v2_reply
             });
 
-            if let Ok(resp) = self
+            let response = self
                 .http
-                .post(&v2_url)
+                .post(v2_url)
                 .headers(self.default_headers())
                 .json(&body)
                 .send()
                 .await
-            {
-                if resp.status().is_success() {
-                    info!("Successfully replied to permission {} via v2 endpoint with {}", request_id, v2_reply);
-                    return Ok(());
-                } else {
-                    debug!("v2 permission reply returned HTTP {}", resp.status());
-                }
+                .map_err(|e| format!("Failed to respond to permission {request_id}: {e}"))?;
+            if response.status().is_success() {
+                info!(
+                    "Successfully replied to permission {} via v2 endpoint with {}",
+                    request_id, v2_reply
+                );
+                return Ok(());
             }
+            let status = response.status();
+            if status != reqwest::StatusCode::NOT_FOUND
+                && status != reqwest::StatusCode::METHOD_NOT_ALLOWED
+            {
+                return Err(format!(
+                    "OpenCode returned {status} for permission {request_id}"
+                ));
+            }
+            debug!("v2 permission reply returned HTTP {}", status);
         }
 
         // 2. Fallback to generic route
-        let fallback_url = format!("{}/api/permission/{}/respond", self.base_url, request_id);
+        let fallback_url = self.api_url(&["api", "permission", request_id, "respond"])?;
         debug!("Trying fallback permission respond at {}", fallback_url);
 
         let body = serde_json::json!({
@@ -362,7 +482,7 @@ impl OpenCodeClient {
 
         let response = self
             .http
-            .post(&fallback_url)
+            .post(fallback_url)
             .headers(self.default_headers())
             .json(&body)
             .send()
@@ -382,8 +502,134 @@ impl OpenCodeClient {
         Ok(())
     }
 
+    fn api_url(&self, segments: &[&str]) -> Result<reqwest::Url, String> {
+        if segments
+            .iter()
+            .any(|segment| matches!(*segment, "" | "." | ".."))
+        {
+            return Err("Invalid OpenCode resource ID".to_string());
+        }
+        let mut url = reqwest::Url::parse(&self.base_url).map_err(|e| e.to_string())?;
+        url.path_segments_mut()
+            .map_err(|_| "Invalid OpenCode server URL".to_string())?
+            .pop_if_empty()
+            .extend(segments);
+        Ok(url)
+    }
+
+    pub async fn auto_approve(
+        &self,
+        request: &PermissionRequest,
+        config: &Config,
+    ) -> Result<bool, String> {
+        if self.connection_config != config.opencode {
+            return Ok(false);
+        }
+        let Some(decision) = config.behavior.automatic_decision() else {
+            return Ok(false);
+        };
+        self.respond_permission(request, decision).await?;
+        info!(
+            "Automatically replied to permission {} with {}",
+            request.id,
+            decision.as_opencode_v2_reply()
+        );
+        Ok(true)
+    }
+
     /// Returns the base URL of the connected server.
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::config::AutoApproval;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    #[tokio::test]
+    async fn automatic_approval_sends_the_selected_opencode_reply() {
+        let path =
+            std::env::temp_dir().join(format!("switchplate-test-{}.sock", std::process::id()));
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut config = Config::default();
+        let client = OpenCodeClient {
+            base_url: "http://localhost".into(),
+            connection_config: config.opencode.clone(),
+            username: "opencode".into(),
+            password: String::new(),
+            http: reqwest::Client::builder()
+                .unix_socket(path.clone())
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .unwrap(),
+        };
+        let request = PermissionRequest {
+            id: "per_test".into(),
+            tool: "shell".into(),
+            args: serde_json::Value::Null,
+            session_id: "ses_test".into(),
+            timestamp: String::new(),
+        };
+
+        for (mode, decision, status) in [
+            (AutoApproval::AllowOnce, "once", "204 No Content"),
+            (AutoApproval::AlwaysAllow, "always", "204 No Content"),
+            (AutoApproval::AllowOnce, "once", "503 Service Unavailable"),
+        ] {
+            config.behavior.auto_approval = mode;
+            let serve = async {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                assert_eq!(
+                    line,
+                    "POST /api/session/ses_test/permission/per_test/reply HTTP/1.1\r\n"
+                );
+                let mut length = 0;
+                loop {
+                    line.clear();
+                    let bytes = reader.read_line(&mut line).await.unwrap();
+                    assert_ne!(bytes, 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.strip_prefix("content-length: ") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).await.unwrap();
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                    serde_json::json!({ "decision": decision }),
+                );
+                let response =
+                    format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                reader
+                    .get_mut()
+                    .write_all(response.as_bytes())
+                    .await
+                    .unwrap();
+            };
+            let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                tokio::join!(client.auto_approve(&request, &config), serve)
+            })
+            .await
+            .unwrap();
+            if status.starts_with("204") {
+                assert_eq!(result, Ok(true));
+            } else {
+                assert!(result.unwrap_err().contains("503"));
+            }
+        }
+
+        config.behavior.pause_monitoring = true;
+        assert_eq!(client.auto_approve(&request, &config).await, Ok(false));
+        std::fs::remove_file(path).unwrap();
     }
 }
